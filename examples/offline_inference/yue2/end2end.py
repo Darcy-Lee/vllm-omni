@@ -22,7 +22,7 @@ import argparse
 import copy
 from pathlib import Path
 
-import torchaudio
+import soundfile as sf
 
 from vllm_omni import Omni
 from vllm_omni.model_executor.models.yue2.constants import (
@@ -82,6 +82,14 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=200, help="semantic frame budget (25 frames = 1 s)")
     parser.add_argument("--abc-file", default=None, help="external ABC score (requires cot=melody/full)")
     parser.add_argument("--output", default="yue2_song.wav")
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="override the deploy yaml's per-stage gpu_memory_utilization "
+        "(necessary on cards shared with other tenants: the yaml fraction is "
+        "of the WHOLE card, not of the free remainder)",
+    )
     args = parser.parse_args()
 
     if args.vae:
@@ -90,7 +98,10 @@ def main() -> None:
         os.environ["YUE2_VAE"] = args.vae
 
     tokenizer = YuE2TextTokenizer(Path(args.model) / "qwen.tiktoken")
-    engine = Omni(model=args.model, trust_remote_code=True)
+    engine_kwargs: dict = {"trust_remote_code": True}
+    if args.gpu_memory_utilization is not None:
+        engine_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+    engine = Omni(model=args.model, **engine_kwargs)
 
     abc_ids = None
     if args.abc_file is not None:
@@ -127,7 +138,9 @@ def main() -> None:
         truncated = bool(int(meta["truncated"][0]))
 
     waveform = audio.reshape(-1, 2).T.unsqueeze(0).float()
-    torchaudio.save(args.output, waveform, sr)
+    # soundfile wants [frames, channels] float in [-1, 1]; torchaudio has no
+    # wheel matching vllm 0.29.0's torch pin, so the driver uses libsndfile.
+    sf.write(args.output, waveform.squeeze(0).T.contiguous(), sr)
     print(
         f"Saved {args.output}: {waveform.shape[-1] / sr:.1f}s @ {sr} Hz stereo, "
         f"truncated={truncated}, generated {len(output.token_ids)} semantic tokens"

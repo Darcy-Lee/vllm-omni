@@ -338,7 +338,11 @@ class Yue2ForCausalLM(nn.Module):
 
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(iter(ar_pairs))
-        return loaded
+        # The NAR/projection modules were populated by hand above;
+        # DefaultModelLoader.track_weights_loading diffs every named
+        # parameter against the returned set, so the side keys must be
+        # reported too or the loader flags them as uninitialized.
+        return loaded | {name for name, _ in remapped}
 
     # ------------------------------------------------------------ hooks
 

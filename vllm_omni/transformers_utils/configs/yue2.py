@@ -56,6 +56,16 @@ class Yue2Config(PretrainedConfig):
         self.latent_dim = latent_dim
         self.max_latent_frames = max_latent_frames
         self.timestep_shift = timestep_shift
+        # The checkpoint's config.json (like upstream's qwen_config derivative,
+        # fast.py) omits the standard Qwen3 fields the AR backbone expects;
+        # synthesize the same defaults upstream does so vLLM's Qwen3Model and
+        # MLP construct without AttributeError.
+        self.hidden_act = str(kwargs.pop("hidden_act", "silu"))
+        self.attention_bias = bool(kwargs.pop("attention_bias", False))
+        self.attention_dropout = float(kwargs.pop("attention_dropout", 0.0))
+        self.use_sliding_window = bool(kwargs.pop("use_sliding_window", False))
+        self.sliding_window = kwargs.pop("sliding_window", None)
+        self.max_window_layers = int(kwargs.pop("max_window_layers", 0))
 
 
 AutoConfig.register("yue2", Yue2Config)

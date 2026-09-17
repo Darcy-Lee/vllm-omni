@@ -124,6 +124,16 @@ def test_sample_row_is_seed_deterministic():
 def test_window_penalty_pushes_down_repeats():
     from vllm_omni.model_executor.models.yue2.sampling import window_penalty
 
-    logits = torch.zeros(3)
+    # Upstream arithmetic: positive logits are divided by penalty**freq,
+    # negative logits multiplied; zero logits stay zero. id 0 seen twice →
+    # freq 2 → alpha 4 → 1/4; untouched ids keep their logit. The old
+    # assertion (out[0] < 0 == out[1]) chained-compared its way into
+    # demanding a sign change on a zero logit.
+    logits = torch.ones(3)
     out = window_penalty(logits, [0, 0], 2.0)
-    assert out[0] < 0 == out[1] == out[2]
+    assert out[0] == pytest.approx(0.25)
+    assert out[1] == out[2] == pytest.approx(1.0)
+    out_neg = window_penalty(-logits, [0, 0], 2.0)
+    assert out_neg[0] == pytest.approx(-4.0)
+    assert out_neg[1] == out_neg[2] == pytest.approx(-1.0)
+    assert window_penalty(torch.zeros(3), [0, 0], 2.0).eq(0).all()
