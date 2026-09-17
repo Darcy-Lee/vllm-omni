@@ -487,6 +487,12 @@ _OMNI_MODELS = {
         "acoustic",
         "MiniMaxMusic3AcousticForConditionalGeneration",
     ),
+    ## YuE2-3B (text-to-music; single-stage native-AR with terminal NAR/VAE)
+    "Yue2ForCausalLM": (
+        "yue2",
+        "yue2",
+        "Yue2ForCausalLM",
+    ),
     "BreezeForConditionalGeneration": (
         "breeze_tts_2",
         "modeling_breeze_tts_2_talker",

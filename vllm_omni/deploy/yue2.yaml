@@ -1,0 +1,38 @@
+# YuE2-3B deploy: single-stage native-AR text-to-music (~3.6B bf16 + VAE).
+# Target 1x 24 GB card; verified shape on a busier 96 GB H20.
+#
+# The architectures pin is required: the checkpoint's config.json names
+# "YuE2ForCausalLM" with an auto_map that only makes sense under
+# trust_remote_code, so the deploy pins vLLM to this package's model class.
+# model_type stays "yue2" so the registered Yue2Config is used.
+pipeline: yue2
+async_chunk: false
+dtype: bfloat16
+trust_remote_code: true
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.85
+    # Phase 1 keeps the backbone eager: the model-owned sampler runs after the
+    # forward, and the terminal NAR/VAE pass runs inside the finishing step.
+    # CUDA-graph capture of the standard Qwen3 backbone is a perf follow-up.
+    enforce_eager: true
+    enable_prefix_caching: true
+    max_num_batched_tokens: 24576
+    max_model_len: 24576
+    devices: "0"
+    hf_overrides:
+      architectures: ["Yue2ForCausalLM"]
+    default_sampling_params:
+      # Placeholder values: the model's own sampler overrides everything from
+      # extra_args. Their presence turns on has_sampling_extra_args, which is
+      # what threads the per-request yue2_* keys into the model's forward.
+      extra_args:
+        yue2_phase: "semantic"
+        yue2_seed: 831001
+        yue2_max_audio_frames: 200
+      detokenize: false
+      # Engine-side backstop; the model stops on its own end token first.
+      max_tokens: 9000
+      temperature: 1.0
