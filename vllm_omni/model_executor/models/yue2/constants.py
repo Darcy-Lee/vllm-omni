@@ -65,5 +65,9 @@ KEY_MIN_TOKENS = "yue2_min_tokens"
 KEY_MAX_AUDIO_FRAMES = "yue2_max_audio_frames"
 KEY_SEED = "yue2_seed"
 KEY_SKIP_SYNTHESIS = "yue2_skip_synthesis"  # abc phase: tokens only, no audio
+# Full prompt token ids, shipped by the driver. The NAR conditioning needs the
+# whole prefix, but under a KV prefix-cache hit the engine schedules only the
+# uncached tail, so the scheduled input_ids slice cannot rebuild it.
+KEY_PREFIX_IDS = "yue2_prefix_ids"
 
 __all__ = [name for name in dir() if name.isupper()]

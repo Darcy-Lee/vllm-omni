@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,6 +56,7 @@ from .constants import (
     KEY_MIN_TOKENS,
     KEY_PENALTY_WINDOW,
     KEY_PHASE,
+    KEY_PREFIX_IDS,
     KEY_REPETITION_PENALTY,
     KEY_SEED,
     KEY_SKIP_SYNTHESIS,
@@ -218,6 +220,7 @@ class _RequestState:
     request_id: str
     constants: _RowConstants
     prompt_tokens: int = 0
+    prompt_len: int = 0  # full prompt length; a completing prefill row reaches it
     prefix_ids: list[int] = field(default_factory=list)
     history: list[int] = field(default_factory=list)
     generator: torch.Generator | None = None
@@ -231,6 +234,16 @@ class Yue2ForCausalLM(nn.Module):
     have_multimodal_outputs = True
     prefer_model_sampler = True
     has_postprocess = False
+    # The song is decoded in-model and shipped via make_omni_output; per-step
+    # hidden states must NOT ride the pooler payload, or the output pipeline
+    # remaps the accumulated "hidden" rows to the audio modality key and the
+    # driver receives hidden states instead of the decoded waveform
+    # (single-stage precedent: minimax_music3 talker).
+    omni_pooler_payload_include_hidden: bool = False
+    # No downstream stage consumes prefix-cached hidden/mm tensors for YuE2;
+    # opting out keeps the merged prefix-cache view from rebuilding "hidden"
+    # payloads (KV-block prefix caching for cot=full stays on).
+    requires_full_prefix_cached_hidden_states: bool = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -270,6 +283,8 @@ class Yue2ForCausalLM(nn.Module):
         self._audio_queue: list[tuple[str, torch.Tensor, bool]] = []
         self._deferred_cleanup_ids: set[str] = set()
         self._step_rows: list[tuple[str, int, int]] = []  # (req_id, computed, scheduled)
+        self._decode_t0: dict[str, float] = {}  # first decode-step wall time, for AR tok/s
+        self._last_mm: dict[str, Any] | None = None  # current step's make_omni_output payload
         self._vae: YuE2VAE | None = None
         self._vae_device: torch.device | None = None
 
@@ -299,8 +314,11 @@ class Yue2ForCausalLM(nn.Module):
         q = attn.q_norm(q.view(T, num_heads, head_dim))
         k = attn.k_norm(k.view(T, num_kv_heads, head_dim))
         rc, rs = cos.unsqueeze(2), sin.unsqueeze(2)
-        q = _apply_rotary(q, rc, rs)
-        k = _apply_rotary(k, rc, rs)
+        # q/k are [T, heads, head_dim] (3D); rc/rs are [1, T, 1, head_dim/2]
+        # (4D). Broadcasting them directly promotes q/k to 4D, which the NAR
+        # attention rejects. Add the batch axis explicitly, then drop it.
+        q = _apply_rotary(q.unsqueeze(0), rc, rs).squeeze(0)
+        k = _apply_rotary(k.unsqueeze(0), rc, rs).squeeze(0)
         return q, k, v.view(T, num_kv_heads, head_dim)
 
     # ------------------------------------------------------------ weights
@@ -389,13 +407,15 @@ class Yue2ForCausalLM(nn.Module):
         return hidden
 
     def _capture_constants(self, kwargs: dict[str, Any], input_ids: torch.Tensor | None) -> None:
-        """Create per-request state at the (never-replayed) prefill step.
+        """Create per-request state on the request's FIRST scheduled step.
 
-        This is the only hook that sees both the sampling extra args and the
-        scheduled prompt tokens, so it is where the request's constants, its
-        seeded generator, and its prompt prefix are captured once. Later
-        decode steps may replay forward from a CUDA graph, skipping this
-        body; ``prepare_runner_inputs`` keeps the row binding alive instead.
+        With KV prefix caching the first step may arrive with ``comp > 0``
+        (a shared head was cached by an earlier request), so ``comp == 0``
+        cannot be the trigger. The scheduled ``input_ids`` slice then holds
+        only the uncached tail, so the driver ships the full prompt ids in
+        the request's extra args (KEY_PREFIX_IDS); they are the source of
+        truth for the NAR conditioning prefix and for the prompt length the
+        sampler uses to tell a completing prefill row from a mid-chunk one.
         """
         extra_args = kwargs.get("sampling_extra_args")
         if extra_args is None or input_ids is None:
@@ -404,35 +424,57 @@ class Yue2ForCausalLM(nn.Module):
         for row, (req_id, comp, span) in enumerate(self._step_rows):
             if row >= len(extra_args):
                 break
-            if comp == 0 and span > 1 and req_id not in self._states:
-                args = extra_args[row] or {}
-                phase = str(args.get(KEY_PHASE, "semantic"))
-                preset = ABC_SAMPLING if phase == "abc" else SEMANTIC_SAMPLING
-                seed = args.get(KEY_SEED, DEFAULT_SEED)
-                constants = _RowConstants(
-                    request_id=req_id,
-                    phase=phase,
-                    temperature=float(args.get(KEY_TEMPERATURE, preset["temperature"])),
-                    top_p=float(args.get(KEY_TOP_P, preset["top_p"])),
-                    top_k=int(args.get(KEY_TOP_K, preset["top_k"])),
-                    repetition_penalty=float(args.get(KEY_REPETITION_PENALTY, preset["repetition_penalty"])),
-                    penalty_window=int(args.get(KEY_PENALTY_WINDOW, preset["penalty_window"])),
-                    min_tokens=int(args.get(KEY_MIN_TOKENS, preset["min_tokens"])),
-                    max_audio_frames=int(args.get(KEY_MAX_AUDIO_FRAMES, preset["max_tokens"])),
-                    seed=int(seed),
-                    skip_synthesis=bool(args.get(KEY_SKIP_SYNTHESIS, phase == "abc")),
+            if req_id in self._states:
+                offset += span
+                continue
+            args = extra_args[row] or {}
+            prefix = args.get(KEY_PREFIX_IDS)
+            if isinstance(prefix, (list, tuple)) and prefix:
+                prefix_ids = [int(v) for v in prefix]
+                prompt_len = len(prefix_ids)
+            elif comp == 0 and span >= 1:
+                # Legacy path (no ids in extra args): only correct when the
+                # whole prompt is scheduled in one chunk with no cache hit.
+                prefix_ids = input_ids[offset : offset + span].tolist()
+                prompt_len = len(prefix_ids)
+            else:
+                logger.warning(
+                    "YuE2 request %s arrived with %d cached tokens but no "
+                    "yue2_prefix_ids in its extra args; cannot rebuild its "
+                    "full prompt (prefix-cache hit on the first request?).",
+                    req_id,
+                    comp,
                 )
-                device = input_ids.device
-                generator = torch.Generator(device=device if device.type != "mps" else "cpu")
-                generator.manual_seed(constants.seed)
-                self._row_constants[req_id] = constants
-                self._states[req_id] = _RequestState(
-                    request_id=req_id,
-                    constants=constants,
-                    prompt_tokens=span,
-                    prefix_ids=input_ids[offset : offset + span].tolist(),
-                    generator=generator,
-                )
+                offset += span
+                continue
+            phase = str(args.get(KEY_PHASE, "semantic"))
+            preset = ABC_SAMPLING if phase == "abc" else SEMANTIC_SAMPLING
+            seed = args.get(KEY_SEED, DEFAULT_SEED)
+            constants = _RowConstants(
+                request_id=req_id,
+                phase=phase,
+                temperature=float(args.get(KEY_TEMPERATURE, preset["temperature"])),
+                top_p=float(args.get(KEY_TOP_P, preset["top_p"])),
+                top_k=int(args.get(KEY_TOP_K, preset["top_k"])),
+                repetition_penalty=float(args.get(KEY_REPETITION_PENALTY, preset["repetition_penalty"])),
+                penalty_window=int(args.get(KEY_PENALTY_WINDOW, preset["penalty_window"])),
+                min_tokens=int(args.get(KEY_MIN_TOKENS, preset["min_tokens"])),
+                max_audio_frames=int(args.get(KEY_MAX_AUDIO_FRAMES, preset["max_tokens"])),
+                seed=int(seed),
+                skip_synthesis=bool(args.get(KEY_SKIP_SYNTHESIS, phase == "abc")),
+            )
+            device = input_ids.device
+            generator = torch.Generator(device=device if device.type != "mps" else "cpu")
+            generator.manual_seed(constants.seed)
+            self._row_constants[req_id] = constants
+            self._states[req_id] = _RequestState(
+                request_id=req_id,
+                constants=constants,
+                prompt_tokens=prompt_len,
+                prompt_len=prompt_len,
+                prefix_ids=prefix_ids,
+                generator=generator,
+            )
             offset += span
 
     def compute_logits(self, hidden_states: torch.Tensor, sampling_metadata: Any = None) -> torch.Tensor:
@@ -454,10 +496,14 @@ class Yue2ForCausalLM(nn.Module):
             state = self._states.get(req_id)
             if state is None or state.finished:
                 continue
-            if span != 1 and not (comp == 0 and span > 1):
+            if comp + span < state.prompt_len:
                 # Mid-chunk prefill rows: their sampled token is discarded.
+                # (A completing prefill row reaches the full prompt length
+                # even when a prefix-cache hit left comp > 0.)
                 continue
             constants = state.constants
+            if state.request_id not in self._decode_t0:
+                self._decode_t0[state.request_id] = time.perf_counter()
             scores = distribution(
                 logits[row],
                 temperature=constants.temperature,
@@ -501,10 +547,54 @@ class Yue2ForCausalLM(nn.Module):
         codec = [t - CODEC_OFFSET for t in state.history]
         if min(codec) < 0 or max(codec) >= CODEC_SIZE:
             raise RuntimeError("semantic history contains non-codec tokens")
+        t0 = self._decode_t0.pop(state.request_id, None)
+        t_nar0 = time.perf_counter()
         latents = synthesize(self, state.prefix_ids, codec, constants.seed, steps=ODE_STEPS)
+        logger.info(
+            "YUE2_LATENTS frames=%d absmax=%.4f mean=%.5f std=%.4f",
+            latents.shape[0],
+            float(latents.abs().max()),
+            float(latents.mean()),
+            float(latents.std()),
+        )
+        t_nar = time.perf_counter() - t_nar0
+        t_vae0 = time.perf_counter()
         audio = self._decode_latents(latents)
-        self._audio_queue.append((state.request_id, audio, state.truncated))
+        t_vae = time.perf_counter() - t_vae0
+        t_ar = (t_nar0 - t0) if t0 is not None else float("nan")
+        logger.info(
+            "YUE2_TIMING req=%s phase=%s ar_tokens=%d ar_s=%.2f ar_tps=%.1f nar_s=%.2f vae_s=%.2f",
+            state.request_id,
+            constants.phase,
+            len(state.history),
+            t_ar,
+            len(state.history) / t_ar if t_ar else float("nan"),
+            t_nar,
+            t_vae,
+        )
+        self._ship_audio(state.request_id, audio, state.truncated)
         del hit_end
+
+    def _ship_audio(self, req_id: str, audio: torch.Tensor, truncated: bool) -> None:
+        """Append the finished song to the CURRENT step's mm payload in place.
+
+        make_omni_output already ran for this step (it ships the sparse marker
+        with empty lists), and the runner assembles per-request payloads only
+        after sample(), so mutating the same dict here is picked up by the
+        sparse routing on the request's last step in the output batch. Leaving
+        the payload for a later step would drop it: the request is gone by
+        then (gepard_talker flushes at its last step for the same reason).
+        """
+        mm = self._last_mm
+        if mm is None:
+            # No forward built a payload this step; fall back to the queue.
+            self._audio_queue.append((req_id, audio, truncated))
+            return
+        mm["model_outputs"].append(audio)
+        mm["sr"].append(torch.tensor(SAMPLE_RATE, dtype=torch.int32))
+        meta = mm["meta"]
+        meta["req_id"].append(req_id)
+        meta["truncated"].append(str(int(truncated)))
 
     def _vae_model(self, device: torch.device) -> YuE2VAE:
         if self._vae is None:
@@ -530,6 +620,7 @@ class Yue2ForCausalLM(nn.Module):
             )
         if not torch.isfinite(audio).all():
             raise RuntimeError("VAE produced non-finite audio")
+        logger.info("YUE2_AUDIO_PRECLAMP absmax=%.4f", float(audio.abs().max()))
         return audio[0].float().clamp(-1, 1).T.contiguous().reshape(-1)
 
     def make_omni_output(self, model_outputs: torch.Tensor | OmniOutput, **kwargs: Any) -> OmniOutput:
@@ -541,19 +632,25 @@ class Yue2ForCausalLM(nn.Module):
             by_req[req_id] = audio
             truncated[req_id] = is_truncated
         self._audio_queue.clear()
-        if not by_req:
-            return OmniOutput(text_hidden_states=model_outputs, multimodal_outputs=None)
         ready = list(by_req)
         sr = torch.tensor(SAMPLE_RATE, dtype=torch.int32)
+        # The sparse marker rides EVERY step, even ones that decoded nothing
+        # (req_id=[] is the legal zero-audio shape): without it the runner
+        # falls back to the dense pooler payload, whose per-step hidden states
+        # land under this stage's "audio" key and the driver receives hidden
+        # states instead of the decoded waveform (gepard_talker precedent).
         mm: dict[str, Any] = {
             "model_outputs": [by_req[r] for r in ready],
             "sr": [sr for _ in ready],
             "meta": {
                 "req_id": ready,
-                "sparse_audio": ["1" for _ in ready],
+                "sparse_audio": ["1"],
                 "truncated": [str(int(truncated[r])) for r in ready],
             },
         }
+        # sample() runs after this each step and appends finished songs into
+        # this very dict (see _ship_audio); keep the handle for it.
+        self._last_mm = mm
         return OmniOutput(text_hidden_states=model_outputs, multimodal_outputs=mm)
 
     def on_requests_finished(self, finished_req_ids: Iterable[str]) -> None:

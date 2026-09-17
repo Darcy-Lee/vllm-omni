@@ -31,6 +31,7 @@ from vllm_omni.model_executor.models.yue2.constants import (
     KEY_MIN_TOKENS,
     KEY_PENALTY_WINDOW,
     KEY_PHASE,
+    KEY_PREFIX_IDS,
     KEY_REPETITION_PENALTY,
     KEY_SEED,
     KEY_SKIP_SYNTHESIS,
@@ -48,7 +49,7 @@ from vllm_omni.model_executor.models.yue2.prompt import (
 from vllm_omni.model_executor.models.yue2.tokenizer import YuE2TextTokenizer
 
 
-def sampling_params(engine, *, phase, seed, max_frames):
+def sampling_params(engine, *, phase, seed, max_frames, prompt_ids):
     """Deep-copy the stage defaults, then set the yue2_* keys for one phase."""
     params = copy.deepcopy(engine.resolve_sampling_params_list(None))[0]
     preset = ABC_SAMPLING if phase == "abc" else SEMANTIC_SAMPLING
@@ -64,6 +65,10 @@ def sampling_params(engine, *, phase, seed, max_frames):
         KEY_MIN_TOKENS: preset["min_tokens"],
         KEY_MAX_AUDIO_FRAMES: max_frames,
         KEY_SKIP_SYNTHESIS: phase == "abc",
+        # Full prompt ids: under a KV prefix-cache hit the engine schedules
+        # only the uncached tail, so the model cannot rebuild its NAR
+        # conditioning prefix from the scheduled tokens alone.
+        KEY_PREFIX_IDS: list(prompt_ids),
     }
     params.max_tokens = preset["max_tokens"] if phase == "abc" else max_frames + 1
     params.stop_token_ids = list(STOP_TOKEN_IDS)
@@ -110,19 +115,23 @@ def main() -> None:
         abc_ids = tokenizer.encode(Path(args.abc_file).read_text())
         print(f"Using supplied ABC score ({len(abc_ids)} tokens)")
     elif args.cot != "off":
-        prompt = {"prompt_token_ids": abc_prefix_ids(tokenizer.encode, args.style, args.lyrics, args.cot)}
-        params = sampling_params(engine, phase="abc", seed=args.seed, max_frames=args.max_frames)
+        prompt_ids = abc_prefix_ids(tokenizer.encode, args.style, args.lyrics, args.cot)
+        prompt = {"prompt_token_ids": prompt_ids}
+        params = sampling_params(
+            engine, phase="abc", seed=args.seed, max_frames=args.max_frames, prompt_ids=prompt_ids
+        )
         outputs = engine.generate([prompt], [params])
         generated = list(outputs[0].outputs[0].token_ids)
         abc_ids = abc_ids_from_generated(generated)
         print(f"Generated ABC score ({len(abc_ids)} tokens):\n{tokenizer.decode(abc_ids)}\n")
 
-    prompt = {
-        "prompt_token_ids": semantic_prefix_ids(
-            tokenizer.encode, args.style, args.lyrics, args.cot, abc_ids=abc_ids
-        )
-    }
-    params = sampling_params(engine, phase="semantic", seed=args.seed, max_frames=args.max_frames)
+    prompt_ids = semantic_prefix_ids(
+        tokenizer.encode, args.style, args.lyrics, args.cot, abc_ids=abc_ids
+    )
+    prompt = {"prompt_token_ids": prompt_ids}
+    params = sampling_params(
+        engine, phase="semantic", seed=args.seed, max_frames=args.max_frames, prompt_ids=prompt_ids
+    )
     outputs = engine.generate([prompt], [params])
     output = outputs[0].outputs[0]
     mm = output.multimodal_output or {}

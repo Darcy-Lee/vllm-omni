@@ -122,7 +122,10 @@ class CachedNAR:
         cos, sin = self.model.rotary(positions)
         x = backbone.embed_tokens(ids)[0]  # [T, H]
         for layer in backbone.layers:
-            q, k, v = self.model.ar_project(layer, x, cos, sin)
+            # Upstream: layer.self_attn.project_qkv(layer.input_layernorm(x), ...)
+            # The layernorm is load-bearing: without it the cached AR K/V
+            # conditioning is garbage and the ODE latents blow up (clipped audio).
+            q, k, v = self.model.ar_project(layer, layer.input_layernorm(x), cos, sin)
             self.cache.append((k, v))
             h = _attention(q, k, v, causal=True, query_chunk_size=self.query_chunk_size)
             x = x + _linear(layer.self_attn.o_proj, h.flatten(1))
@@ -137,7 +140,7 @@ class CachedNAR:
         x = x + model.time_embedder(shifted.expand(self.nar_length))[None]
         x = x + self.pos_emb
         for layer, (ar_k, ar_v) in zip(model.nar_layers, self.cache):
-            q, k, v = layer.project_qkv(layer.input_layernorm(x), self.cos, self.sin)
+            q, k, v = layer.self_attn.project_qkv(layer.input_layernorm(x), self.cos, self.sin)
             k, v = torch.cat((ar_k, k[0])), torch.cat((ar_v, v[0]))
             h = _attention(q[0], k, v, causal=False, query_chunk_size=self.query_chunk_size)
             x = x + _linear(layer.self_attn.o_proj, h.flatten(1)[None])
