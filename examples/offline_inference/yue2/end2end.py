@@ -88,6 +88,12 @@ def main() -> None:
     parser.add_argument("--abc-file", default=None, help="external ABC score (requires cot=melody/full)")
     parser.add_argument("--output", default="yue2_song.wav")
     parser.add_argument(
+        "--dump-tokens",
+        default=None,
+        metavar="PATH",
+        help="write prompt + generated token ids to this json (default: <output>.tokens.json)",
+    )
+    parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=None,
@@ -134,6 +140,20 @@ def main() -> None:
     )
     outputs = engine.generate([prompt], [params])
     output = outputs[0].outputs[0]
+    generated_ids = list(output.token_ids)
+    if args.dump_tokens:
+        import json
+
+        payload = {
+            "prompt_token_ids": prompt_ids,
+            "generated_token_ids": generated_ids,
+            "seed": args.seed,
+            "cot": args.cot,
+            "max_frames": args.max_frames,
+        }
+        dump_path = args.dump_tokens if args.dump_tokens.endswith(".json") else args.output + ".tokens.json"
+        Path(dump_path).write_text(json.dumps(payload))
+        print(f"Dumped {len(generated_ids)} generated token ids to {dump_path}")
     mm = output.multimodal_output or {}
     audio = mm.get("audio")
     if audio is None and "model_outputs" in mm:
