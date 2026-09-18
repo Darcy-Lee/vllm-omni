@@ -71,6 +71,9 @@ its own end token; `truncated` in the report line says which happened.
   `/v1/audio/speech` adapter are follow-ups; the abc phase runs eagerly
   after prefill (its tokens are the product, not audio).
 - Audio is not expected to match the upstream torch reference bit-for-bit
-  (fused vs eager kernels); the acceptance check is that the first frames of
-  the semantic token stream agree before kernel divergence, per the
-  MiniMax Music 3 precedent.
+  (fused vs eager kernels). Measured against the upstream torch reference
+  (bd90e4c, same style/lyrics/seed 831001, cot=off, 200 frames): prompt token
+  ids 63/63 bit-identical, and the sampled semantic stream agrees
+  bit-for-bit for the first 55 frames before kernel numerics diverge — well
+  past the "first frames agree" acceptance bar of the MiniMax Music 3
+  precedent.
