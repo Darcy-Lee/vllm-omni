@@ -32,7 +32,7 @@ def window_penalty(logits: torch.Tensor, recent_ids: list[int], penalty: float) 
         recent = recent.reshape(1, -1)
     freq = torch.zeros_like(logits)
     freq.scatter_add_(-1, recent, torch.ones_like(recent, dtype=logits.dtype))
-    alpha = penalty ** freq
+    alpha = penalty**freq
     return torch.where(logits < 0, logits * alpha, logits / alpha)
 
 

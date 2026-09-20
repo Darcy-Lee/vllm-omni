@@ -95,7 +95,6 @@ from vllm_omni.model_executor.models.ming_tts.pipeline import (
 from vllm_omni.model_executor.models.minicpmo_4_5.pipeline import MINICPMO_4_5_PIPELINE
 from vllm_omni.model_executor.models.minimax_h3.pipeline import MINIMAX_H3_PIPELINE
 from vllm_omni.model_executor.models.minimax_music3.pipeline import MINIMAX_MUSIC3_PIPELINE
-from vllm_omni.model_executor.models.yue2.pipeline import YUE2_PIPELINE
 from vllm_omni.model_executor.models.moss_tts.pipeline import (
     MOSS_TTS_LOCAL_PIPELINE,
     MOSS_TTS_PIPELINE,
@@ -123,6 +122,7 @@ from vllm_omni.model_executor.models.step_audio2.pipeline import (
 from vllm_omni.model_executor.models.voxcpm2.pipeline import VOXCPM2_PIPELINE
 from vllm_omni.model_executor.models.voxtral_tts.pipeline import VOXTRAL_TTS_PIPELINE
 from vllm_omni.model_executor.models.wan2_2.pipeline import WAN2_2_TI2V_PIPELINE
+from vllm_omni.model_executor.models.yue2.pipeline import YUE2_PIPELINE
 
 logger = init_logger(__name__)
 

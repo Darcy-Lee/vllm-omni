@@ -21,6 +21,7 @@ installed (CI / dev boxes), not standalone.
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 import vllm_omni
@@ -30,12 +31,14 @@ from vllm_omni.model_executor.models.registry import _OMNI_MODELS
 from vllm_omni.model_executor.models.yue2.constants import (
     ABC_END,
     CONTEXT,
-    MUSIC_END,
     KEY_PHASE,
+    MUSIC_END,
 )
 from vllm_omni.transformers_utils.configs.yue2 import Yue2Config
 
 ARCH = "Yue2ForCausalLM"
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_pipeline_is_registered_as_single_stage_ar():
@@ -92,6 +95,8 @@ def test_config_keeps_the_acoustic_fields():
 
 
 class TestDeployYaml:
+    doc: dict
+
     @classmethod
     def setup_class(cls):
         path = Path(vllm_omni.__file__).parent / "deploy" / "yue2.yaml"

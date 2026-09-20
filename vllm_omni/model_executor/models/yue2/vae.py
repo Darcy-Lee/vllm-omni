@@ -1,15 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Portable FP32 YuE2 Oobleck VAE with exact-boundary tiled decoding.
 
 Oobleck and SnakeBeta derived from stable-audio-tools a6ae0cdf8b2eb1567a4b42ceadddec3712d99d45.
 Copyright (c) 2023 Stability AI; Copyright (c) 2022 NVIDIA CORPORATION.
 MIT: see THIRD_PARTY_NOTICES.md shipped with this module/model repository.
 """
+
 from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 import torch
 from torch import nn
@@ -19,6 +24,7 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 def checkpoint(function, *args, **kwargs):
     from torch.utils.checkpoint import checkpoint as torch_checkpoint
+
     kwargs.setdefault("use_reentrant", False)
     return torch_checkpoint(function, *args, **kwargs)
 
@@ -32,9 +38,7 @@ def WNConvTranspose1d(*args, **kwargs):
 
 
 def snake_beta(x, alpha, beta):
-    return x + (1.0 / (beta + 0.000000001)) * torch.pow(
-        torch.sin(x * alpha), 2
-    )
+    return x + (1.0 / (beta + 0.000000001)) * torch.pow(torch.sin(x * alpha), 2)
 
 
 class SnakeBeta(nn.Module):
@@ -67,9 +71,7 @@ class SnakeBeta(nn.Module):
         return snake_beta(x, alpha, beta)
 
 
-def get_activation(
-    activation: Literal["elu", "snake", "none"], channels=None
-) -> nn.Module:
+def get_activation(activation: Literal["elu", "snake", "none"], channels=None) -> nn.Module:
     if activation == "elu":
         return nn.ELU()
     if activation == "snake":
@@ -273,45 +275,116 @@ class YuE2VAEConfig(PretrainedConfig):
 
     model_type = "yue2_vae"
 
-    _hf_fields = frozenset({
-        "model_type", "architectures", "auto_map", "transformers_version",
-        "dtype", "torch_dtype", "return_dict", "output_hidden_states",
-        "output_attentions", "use_cache", "tie_word_embeddings", "torchscript",
-        "is_decoder", "is_encoder_decoder", "add_cross_attention",
-        "bos_token_id", "eos_token_id", "pad_token_id", "decoder_start_token_id",
-        "attn_implementation",
-    })
+    _hf_fields = frozenset(
+        {
+            "model_type",
+            "architectures",
+            "auto_map",
+            "transformers_version",
+            "dtype",
+            "torch_dtype",
+            "return_dict",
+            "output_hidden_states",
+            "output_attentions",
+            "use_cache",
+            "tie_word_embeddings",
+            "torchscript",
+            "is_decoder",
+            "is_encoder_decoder",
+            "add_cross_attention",
+            "bos_token_id",
+            "eos_token_id",
+            "pad_token_id",
+            "decoder_start_token_id",
+            "attn_implementation",
+        }
+    )
 
     def to_dict(self):
-        return {key: value for key, value in super().to_dict().items()
-                if key in self._hf_fields or key in self._inference_fields}
+        return {
+            key: value
+            for key, value in super().to_dict().items()
+            if key in self._hf_fields or key in self._inference_fields
+        }
 
-    _inference_fields = frozenset(['encoder_config', 'decoder_config', 'sample_rate', 'latent_dim', 'downsampling_ratio', 'audio_channels', 'release_variant', 'decode_core_frames', 'decode_halo_frames'])
+    _inference_fields = frozenset(
+        [
+            "encoder_config",
+            "decoder_config",
+            "sample_rate",
+            "latent_dim",
+            "downsampling_ratio",
+            "audio_channels",
+            "release_variant",
+            "decode_core_frames",
+            "decode_halo_frames",
+        ]
+    )
 
-    def __init__(self, encoder_config=None, decoder_config=None,
-                 sample_rate=48000, latent_dim=64, downsampling_ratio=1920,
-                 audio_channels=2, release_variant="standard",
-                 decode_core_frames=1024, decode_halo_frames=16,
-                 **kwargs):
+    def __init__(
+        self,
+        encoder_config=None,
+        decoder_config=None,
+        sample_rate=48000,
+        latent_dim=64,
+        downsampling_ratio=1920,
+        audio_channels=2,
+        release_variant="standard",
+        decode_core_frames=1024,
+        decode_halo_frames=16,
+        **kwargs,
+    ):
         kwargs = {key: value for key, value in kwargs.items() if key in self._hf_fields}
         kwargs.setdefault("architectures", ["YuE2VAE"])
-        kwargs.setdefault("auto_map", {
-            "AutoConfig": "modeling_vae.YuE2VAEConfig",
-            "AutoModel": "modeling_vae.YuE2VAE",
-        })
+        kwargs.setdefault(
+            "auto_map",
+            {
+                "AutoConfig": "modeling_vae.YuE2VAEConfig",
+                "AutoModel": "modeling_vae.YuE2VAE",
+            },
+        )
         super().__init__(**kwargs)
         self.encoder_config = encoder_config or dict(
-            in_channels=2, channels=64, c_mults=[1, 2, 4, 8, 16, 32],
-            strides=[2, 2, 4, 4, 5, 6], latent_dim=128, use_snake=True)
+            in_channels=2,
+            channels=64,
+            c_mults=[1, 2, 4, 8, 16, 32],
+            strides=[2, 2, 4, 4, 5, 6],
+            latent_dim=128,
+            use_snake=True,
+        )
         self.decoder_config = decoder_config or dict(
-            out_channels=2, channels=64, c_mults=[1, 2, 4, 8, 16, 32],
-            strides=[2, 2, 4, 4, 5, 6], latent_dim=64, use_snake=True,
-            snake_type="vanilla", use_filter=False, final_tanh=False)
-        encoder_fields = {"in_channels", "channels", "latent_dim", "c_mults", "strides",
-                          "use_snake", "antialias_activation"}
-        decoder_fields = {"out_channels", "channels", "latent_dim", "c_mults", "strides",
-                          "use_snake", "snake_type", "antialias_activation",
-                          "use_nearest_upsample", "use_filter", "final_tanh"}
+            out_channels=2,
+            channels=64,
+            c_mults=[1, 2, 4, 8, 16, 32],
+            strides=[2, 2, 4, 4, 5, 6],
+            latent_dim=64,
+            use_snake=True,
+            snake_type="vanilla",
+            use_filter=False,
+            final_tanh=False,
+        )
+        encoder_fields = {
+            "in_channels",
+            "channels",
+            "latent_dim",
+            "c_mults",
+            "strides",
+            "use_snake",
+            "antialias_activation",
+        }
+        decoder_fields = {
+            "out_channels",
+            "channels",
+            "latent_dim",
+            "c_mults",
+            "strides",
+            "use_snake",
+            "snake_type",
+            "antialias_activation",
+            "use_nearest_upsample",
+            "use_filter",
+            "final_tanh",
+        }
         self.encoder_config = {key: value for key, value in self.encoder_config.items() if key in encoder_fields}
         self.decoder_config = {key: value for key, value in self.decoder_config.items() if key in decoder_fields}
         self.sample_rate = int(sample_rate)
@@ -340,12 +413,10 @@ def _dependency_interval(module, low, high):
         a, b = _dependency_interval(module.layers, low, high)
         return min(a, low), max(b, high)
     if isinstance(module, nn.ConvTranspose1d):
-        s, p, d, k = (module.stride[0], module.padding[0],
-                      module.dilation[0], module.kernel_size[0])
+        s, p, d, k = (module.stride[0], module.padding[0], module.dilation[0], module.kernel_size[0])
         return -(-(low + p - d * (k - 1)) // s), (high + p) // s
     if isinstance(module, nn.Conv1d):
-        s, p, d, k = (module.stride[0], module.padding[0],
-                      module.dilation[0], module.kernel_size[0])
+        s, p, d, k = (module.stride[0], module.padding[0], module.dilation[0], module.kernel_size[0])
         return low * s - p, high * s - p + d * (k - 1)
     if isinstance(module, (SnakeBeta, nn.ELU, nn.Identity, nn.Tanh)):
         return low, high
@@ -359,13 +430,17 @@ def _output_length(module, length):
             length = _output_length(child, length)
         return length
     if isinstance(module, nn.ConvTranspose1d):
-        return ((length - 1) * module.stride[0] - 2 * module.padding[0]
-                + module.dilation[0] * (module.kernel_size[0] - 1)
-                + module.output_padding[0] + 1)
+        return (
+            (length - 1) * module.stride[0]
+            - 2 * module.padding[0]
+            + module.dilation[0] * (module.kernel_size[0] - 1)
+            + module.output_padding[0]
+            + 1
+        )
     if isinstance(module, nn.Conv1d):
-        return ((length + 2 * module.padding[0]
-                 - module.dilation[0] * (module.kernel_size[0] - 1) - 1)
-                // module.stride[0] + 1)
+        return (length + 2 * module.padding[0] - module.dilation[0] * (module.kernel_size[0] - 1) - 1) // module.stride[
+            0
+        ] + 1
     if isinstance(module, (ResidualUnit, SnakeBeta, nn.ELU, nn.Identity, nn.Tanh)):
         return length
     raise TypeError(f"No audited length rule for {type(module).__name__}")
@@ -392,17 +467,30 @@ class YuE2VAE(PreTrainedModel):
         self.eval().requires_grad_(False)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args,
-                        config=None, decoder_only=False, device="cpu",
-                        torch_dtype=None, dtype=None, revision=None, token=None,
-                        cache_dir=None, local_files_only=False,
-                        force_download=False, subfolder="", **kwargs):
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path,
+        *model_args,
+        config=None,
+        decoder_only=False,
+        device="cpu",
+        torch_dtype=None,
+        dtype=None,
+        revision=None,
+        token=None,
+        cache_dir=None,
+        local_files_only=False,
+        force_download=False,
+        subfolder="",
+        **kwargs,
+    ):
         """Load a local export or Hub repository, selecting decoder tensors.
 
         Complete exports use unprefixed EMA keys. ``decoder_only=True`` avoids
         constructing the encoder or loading encoder tensors into RAM/GPU.
         """
         from safetensors import safe_open
+
         requested_dtype = dtype if dtype is not None else torch_dtype
         if requested_dtype not in (None, "auto", "float32", torch.float32):
             raise ValueError("The validated VAE requires FP32; quantize the LM separately")
@@ -416,23 +504,39 @@ class YuE2VAE(PreTrainedModel):
                 device = device_map[""]
             else:
                 raise ValueError("Use decoder_only=True and a single device for the VAE")
-        for name in ("trust_remote_code", "low_cpu_mem_usage", "_from_auto",
-                     "_from_pipeline", "_commit_hash", "adapter_kwargs",
-                     "_fast_init", "weights_only", "use_safetensors"):
+        for name in (
+            "trust_remote_code",
+            "low_cpu_mem_usage",
+            "_from_auto",
+            "_from_pipeline",
+            "_commit_hash",
+            "adapter_kwargs",
+            "_fast_init",
+            "weights_only",
+            "use_safetensors",
+        ):
             kwargs.pop(name, None)
         output_loading_info = kwargs.pop("output_loading_info", False)
         if kwargs or model_args:
             raise TypeError(f"Unsupported VAE loading options: {sorted(kwargs)}")
         path = Path(pretrained_model_name_or_path).expanduser()
         if not path.is_dir():
-            from huggingface_hub import snapshot_download
-            path = Path(snapshot_download(
-                str(pretrained_model_name_or_path), revision=revision, token=token,
-                cache_dir=cache_dir, local_files_only=local_files_only,
-                force_download=force_download,
-                allow_patterns=[f"{subfolder + '/' if subfolder else ''}{pattern}"
-                                for pattern in ("config.json", "*.safetensors",
-                                                "*.safetensors.index.json")]))
+            from vllm_omni.transformers_utils.repo_utils import hf_api
+
+            path = Path(
+                hf_api().snapshot_download(
+                    str(pretrained_model_name_or_path),
+                    revision=revision,
+                    token=token,
+                    cache_dir=cache_dir,
+                    local_files_only=local_files_only,
+                    force_download=force_download,
+                    allow_patterns=[
+                        f"{subfolder + '/' if subfolder else ''}{pattern}"
+                        for pattern in ("config.json", "*.safetensors", "*.safetensors.index.json")
+                    ],
+                )
+            )
         path = path / subfolder
         if config is None:
             config = YuE2VAEConfig.from_pretrained(path, local_files_only=True)
@@ -440,8 +544,7 @@ class YuE2VAE(PreTrainedModel):
         index = path / "model.safetensors.index.json"
         if index.exists():
             mapping = json.loads(index.read_text())["weight_map"]
-            files = sorted({name for key, name in mapping.items()
-                            if not decoder_only or key.startswith("decoder.")})
+            files = sorted({name for key, name in mapping.items() if not decoder_only or key.startswith("decoder.")})
         else:
             files = ["model.safetensors"]
         state = {}
@@ -454,15 +557,16 @@ class YuE2VAE(PreTrainedModel):
                         state[key] = handle.get_tensor(key)
         expected = set(model.state_dict())
         if set(state) != expected:
-            raise ValueError(f"VAE tensor mismatch: missing={sorted(expected-set(state))}, "
-                             f"unexpected={sorted(set(state)-expected)}")
+            raise ValueError(
+                f"VAE tensor mismatch: missing={sorted(expected - set(state))}, "
+                f"unexpected={sorted(set(state) - expected)}"
+            )
         if any(value.dtype != torch.float32 for value in state.values()):
             raise ValueError("VAE export contains tensors that are not FP32")
         model.load_state_dict(state, strict=True)
         model.to(device=device, dtype=torch.float32).eval().requires_grad_(False)
         if output_loading_info:
-            return model, dict(missing_keys=[], unexpected_keys=[], mismatched_keys=[],
-                               error_msgs=[])
+            return model, dict(missing_keys=[], unexpected_keys=[], mismatched_keys=[], error_msgs=[])
         return model
 
     def save_pretrained(self, save_directory, *args, **kwargs):
@@ -478,8 +582,7 @@ class YuE2VAE(PreTrainedModel):
 
     def _latent(self, latent):
         latent = torch.as_tensor(latent)
-        if (latent.ndim != 3 or latent.shape[1] != self.config.latent_dim
-                or latent.shape[0] < 1 or latent.shape[-1] < 1):
+        if latent.ndim != 3 or latent.shape[1] != self.config.latent_dim or latent.shape[0] < 1 or latent.shape[-1] < 1:
             raise ValueError(f"Expected nonempty [B,{self.config.latent_dim},T] latents")
         if not torch.isfinite(latent).all():
             raise ValueError("VAE latents contain non-finite values")
@@ -498,8 +601,11 @@ class YuE2VAE(PreTrainedModel):
         if self.decoder_only:
             raise RuntimeError("Encoder not loaded; reload with decoder_only=False")
         audio = torch.as_tensor(audio)
-        if (audio.ndim != 3 or audio.shape[1] != self.config.audio_channels
-                or audio.shape[-1] < self.config.downsampling_ratio):
+        if (
+            audio.ndim != 3
+            or audio.shape[1] != self.config.audio_channels
+            or audio.shape[-1] < self.config.downsampling_ratio
+        ):
             raise ValueError("Expected audio [B,2,S] with at least one latent frame")
         if not torch.isfinite(audio).all():
             raise ValueError("Audio contains non-finite values")
@@ -508,8 +614,7 @@ class YuE2VAE(PreTrainedModel):
         mean, scale = pre.chunk(2, dim=1)
         stdev = torch.nn.functional.softplus(scale) + 1e-4
         if sample:
-            noise = torch.randn(mean.shape, dtype=mean.dtype,
-                                device=device, generator=generator)
+            noise = torch.randn(mean.shape, dtype=mean.dtype, device=device, generator=generator)
             latent = noise * stdev + mean
         else:
             latent = mean
@@ -536,9 +641,14 @@ class YuE2VAE(PreTrainedModel):
         return max(0, -low, high - core_frames + 1)
 
     @torch.inference_mode()
-    def decode_tiled(self, latent, core_frames=None, halo_frames=None,
-                     output_device="cpu",
-                     on_progress: Callable[[int, int], None] | None = None):
+    def decode_tiled(
+        self,
+        latent,
+        core_frames=None,
+        halo_frames=None,
+        output_device="cpu",
+        on_progress: Callable[[int, int], None] | None = None,
+    ):
         """Decode bounded tiles, retaining exact cores with natural end length.
 
         Each crop has enough left/right context for every dependency. There is
@@ -559,8 +669,9 @@ class YuE2VAE(PreTrainedModel):
         frames = latent.shape[-1]
         ratio = self.config.downsampling_ratio
         total = self.natural_output_length(frames)
-        audio = torch.empty((latent.shape[0], self.config.audio_channels, total),
-                            dtype=torch.float32, device=output_device)
+        audio = torch.empty(
+            (latent.shape[0], self.config.audio_channels, total), dtype=torch.float32, device=output_device
+        )
         tiles = (frames + core_frames - 1) // core_frames
         for tile_index, start in enumerate(range(0, frames, core_frames)):
             end = min(frames, start + core_frames)
@@ -569,7 +680,7 @@ class YuE2VAE(PreTrainedModel):
             tile = self.decode(latent[..., left:right])
             out_start, out_end = start * ratio, min(end * ratio, total)
             crop_start = (start - left) * ratio
-            crop = tile[..., crop_start:crop_start + out_end - out_start]
+            crop = tile[..., crop_start : crop_start + out_end - out_start]
             if crop.shape[-1] != out_end - out_start:
                 raise RuntimeError("VAE tile did not cover its requested output core")
             audio[..., out_start:out_end].copy_(crop.to(output_device))

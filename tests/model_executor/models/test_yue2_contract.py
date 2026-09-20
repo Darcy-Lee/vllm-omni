@@ -24,6 +24,8 @@ from vllm_omni.model_executor.models.yue2.prompt import (
 )
 from vllm_omni.model_executor.models.yue2.sampling import distribution, sample_row
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 def _encode(text):
     # Stand-in for the tiktoken BPE: any deterministic id under EOD works for

@@ -50,6 +50,8 @@ NAR_LAYER_NAMES = [
 TOP_AR_NAMES = ["model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"]
 TOP_SIDE_NAMES = ["vae2llm.weight", "llm2vae.weight", "time_embedder.mlp.0.weight"]
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 def _t():
     return torch.zeros(1)

@@ -26,8 +26,7 @@ INSTRUCTIONS = {
         "generate music with codec tokens from the given conditions."
     ),
     "full": (
-        "Generate a chord-annotated ABC transcription, then generate music "
-        "with codec tokens from the given conditions."
+        "Generate a chord-annotated ABC transcription, then generate music with codec tokens from the given conditions."
     ),
 }
 
@@ -80,7 +79,7 @@ def abc_ids_from_generated(generated: list[int]) -> list[int]:
 
 def semantic_frames(generated: list[int]) -> list[int]:
     """Codec frame values (0..CODEC_SIZE-1) from semantic-phase output."""
-    from .constants import CODEC_OFFSET, MUSIC_END
+    from .constants import CODEC_OFFSET
 
     ids = list(generated)
     if ids and ids[-1] == MUSIC_END:

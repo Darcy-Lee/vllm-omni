@@ -22,6 +22,8 @@ import torch
 from vllm_omni.model_executor.models.yue2.constants import CODEC_OFFSET, CODEC_SIZE, CONTEXT, MUSIC_END
 from vllm_omni.model_executor.models.yue2.nar import _attention, chunk_ranges, song_chunks
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 class TestChunkRanges:
     def test_short_song_is_one_chunk(self):
@@ -56,7 +58,7 @@ class TestSongChunks:
         assert chunk.ar_tokens == [1, 2, 3, CODEC_OFFSET + 5, CODEC_OFFSET + 6, CODEC_OFFSET + 7, MUSIC_END]
 
     def test_whole_song_noise_is_drawn_once_then_cut(self):
-        frames, prefix, seed = 30000, 63, 831001
+        frames, prefix, seed = 30000, [0] * 63, 831001
         chunks = song_chunks(prefix, list(range(frames)), seed=seed)
         # Reference: one draw for the whole song, sliced at the same cuts.
         generator = torch.Generator().manual_seed(seed)

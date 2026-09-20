@@ -12,9 +12,9 @@ bidirectionally, which a per-chunk prefill + concatenated K/V reproduces.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Sequence
 
 import torch
 import torch.nn.functional as F

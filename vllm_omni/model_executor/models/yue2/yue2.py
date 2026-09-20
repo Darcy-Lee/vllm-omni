@@ -44,13 +44,6 @@ from .constants import (
     ABC_END,
     ABC_SAMPLING,
     CODEC_OFFSET,
-    LATENT_DIM,
-    MUSIC_END,
-    ODE_STEPS,
-    SAMPLE_RATE,
-    SEMANTIC_SAMPLING,
-    VAE_CORE_FRAMES,
-    VAE_HALO_FRAMES,
     DEFAULT_VAE_ID,
     KEY_MAX_AUDIO_FRAMES,
     KEY_MIN_TOKENS,
@@ -63,10 +56,18 @@ from .constants import (
     KEY_TEMPERATURE,
     KEY_TOP_K,
     KEY_TOP_P,
+    LATENT_DIM,
+    MUSIC_END,
+    ODE_STEPS,
+    SAMPLE_RATE,
+    SEMANTIC_SAMPLING,
+    VAE_CORE_FRAMES,
+    VAE_HALO_FRAMES,
 )
 from .nar import synthesize
 from .sampling import distribution, sample_row
 from .vae import YuE2VAE
+from .weights import partition_checkpoint_weights
 
 logger = init_logger(__name__)
 
@@ -324,32 +325,8 @@ class Yue2ForCausalLM(nn.Module):
     # ------------------------------------------------------------ weights
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        ar_pairs: list[tuple[str, torch.Tensor]] = []
-        side: dict[str, torch.Tensor] = {}
-        for name, tensor in weights:
-            if name == "latent_pos_embed.pe":
-                continue  # deterministic sinusoid, rebuilt in __init__
-            if ".nar_" in name or name.split(".", 1)[0] in {"vae2llm", "llm2vae", "time_embedder"}:
-                side[name] = tensor
-                continue
-            ar_pairs.append((name, tensor))
-
-        # Remap checkpoint NAR names onto the parallel module list:
-        # model.layers.N.nar_self_attn.X -> nar_layers.N.self_attn.X, etc.
-        remapped: list[tuple[str, torch.Tensor]] = []
-        for name, tensor in side.items():
-            new = name
-            if name.startswith("model.layers."):
-                rest = name[len("model.layers.") :]
-                layer_no, _, tail = rest.partition(".")
-                if tail.startswith("nar_"):
-                    tail = tail[len("nar_") :]
-                new = f"nar_layers.{layer_no}.{tail}"
-            remapped.append((new, tensor))
-
-        missing, unexpected = self.load_state_dict(
-            dict(remapped), strict=False
-        )
+        ar_pairs, remapped = partition_checkpoint_weights(weights)
+        missing, unexpected = self.load_state_dict(dict(remapped), strict=False)
         missing = [k for k in missing if not k.startswith(("model.", "lm_head"))]
         if missing or unexpected:
             raise RuntimeError(f"YuE2 NAR/projection weight mismatch: missing={missing}, unexpected={unexpected}")
@@ -608,7 +585,7 @@ class Yue2ForCausalLM(nn.Module):
 
     def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
         """[frames, 64] FP32 CPU latents -> interleaved stereo [samples, 2]."""
-        device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
+        device = f"cuda:{torch.accelerator.current_device_index()}" if torch.cuda.is_available() else "cpu"
         model = self._vae_model(torch.device(device))
         z = latents.T.unsqueeze(0)  # [1, 64, T]
         with torch.inference_mode():

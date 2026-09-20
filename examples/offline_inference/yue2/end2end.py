@@ -123,17 +123,13 @@ def main() -> None:
     elif args.cot != "off":
         prompt_ids = abc_prefix_ids(tokenizer.encode, args.style, args.lyrics, args.cot)
         prompt = {"prompt_token_ids": prompt_ids}
-        params = sampling_params(
-            engine, phase="abc", seed=args.seed, max_frames=args.max_frames, prompt_ids=prompt_ids
-        )
+        params = sampling_params(engine, phase="abc", seed=args.seed, max_frames=args.max_frames, prompt_ids=prompt_ids)
         outputs = engine.generate([prompt], [params])
         generated = list(outputs[0].outputs[0].token_ids)
         abc_ids = abc_ids_from_generated(generated)
         print(f"Generated ABC score ({len(abc_ids)} tokens):\n{tokenizer.decode(abc_ids)}\n")
 
-    prompt_ids = semantic_prefix_ids(
-        tokenizer.encode, args.style, args.lyrics, args.cot, abc_ids=abc_ids
-    )
+    prompt_ids = semantic_prefix_ids(tokenizer.encode, args.style, args.lyrics, args.cot, abc_ids=abc_ids)
     prompt = {"prompt_token_ids": prompt_ids}
     params = sampling_params(
         engine, phase="semantic", seed=args.seed, max_frames=args.max_frames, prompt_ids=prompt_ids

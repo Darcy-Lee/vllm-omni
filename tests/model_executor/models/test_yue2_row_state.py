@@ -24,14 +24,13 @@ import torch
 from vllm_omni.model_executor.models.yue2.constants import (
     ABC_END,
     CODEC_OFFSET,
-    MUSIC_END,
-    KEY_MAX_AUDIO_FRAMES,
     KEY_MIN_TOKENS,
     KEY_PHASE,
     KEY_PREFIX_IDS,
     KEY_SEED,
     KEY_SKIP_SYNTHESIS,
     KEY_TEMPERATURE,
+    MUSIC_END,
     SEMANTIC_SAMPLING,
     VOCAB_SIZE,
 )
@@ -40,6 +39,8 @@ from vllm_omni.model_executor.models.yue2.yue2 import (
     _RequestState,
     _RowConstants,
 )
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def make_model() -> Yue2ForCausalLM:
@@ -201,9 +202,7 @@ class TestSampleRows:
         model._states["a"] = make_state("a")
         model._states["b"] = make_state("b")
         model._step_rows = [("a", 63, 1), ("b", 63, 1)]
-        out = model.sample(
-            logits_for(CODEC_OFFSET + 5, CODEC_OFFSET + 7, rows=2), None
-        )
+        out = model.sample(logits_for(CODEC_OFFSET + 5, CODEC_OFFSET + 7, rows=2), None)
         assert out.sampled_token_ids[0, 0].item() == CODEC_OFFSET + 5
         assert out.sampled_token_ids[1, 0].item() == CODEC_OFFSET + 7
         assert model._states["a"].history == [CODEC_OFFSET + 5]
@@ -259,9 +258,7 @@ class TestCaptureConstants:
     def test_cache_hit_without_shipped_ids_creates_no_state(self):
         model = self._model()
         model._step_rows = [("r1", 50, 13)]
-        model._capture_constants(
-            self._kwargs({KEY_PHASE: "semantic"}), torch.zeros(13, dtype=torch.long)
-        )
+        model._capture_constants(self._kwargs({KEY_PHASE: "semantic"}), torch.zeros(13, dtype=torch.long))
         assert "r1" not in model._states
         assert "r1" not in model._row_constants
 

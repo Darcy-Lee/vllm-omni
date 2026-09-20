@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
+
 """Minimal YuE2 text tokenizer (frozen tiktoken BPE), vendored from upstream.
 
 Used by the offline driver to build token-id prompts; the audio codec tokens
@@ -6,9 +9,10 @@ never pass through it.
 
 from __future__ import annotations
 
-import base64
 import unicodedata
 from pathlib import Path
+
+import pybase64 as base64
 
 
 class YuE2TextTokenizer:

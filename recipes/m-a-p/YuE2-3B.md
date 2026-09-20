@@ -29,7 +29,7 @@ user-downloaded weights and bundles none.
 ## Architecture
 
 | Component | Spec |
-|---|---|
+| --- | --- |
 | Backbone | Qwen3-1.7B-class decoder, 28 layers, hidden 2048, GQA 16/8, q/k-norm, vocab 184,704, context 24,576 |
 | MoT | NAR path (`nar_self_attn`/`nar_mlp` per layer) shares embed_tokens, final norm and lm_head with the AR path |
 | Frames | Single codebook: one codec token per frame, 25 frames/s, span [151853, 184521) |
