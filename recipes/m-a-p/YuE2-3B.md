@@ -7,7 +7,7 @@
 - Vendor: m-a-p (Multimodal Art Projection)
 - Model: `m-a-p/YuE2-3B` + `m-a-p/YuE2-Vae`
 - Task: Text-to-music generation with an editable symbolic plan (ABC notation)
-- Mode: Offline generation (Phase 1); online `/v1/audio/speech` serving is a follow-up
+- Mode: Offline generation and online `/v1/audio/speech` serving (adapter `tts_adapters/yue2.py`)
 - Integration issue: [#7661](https://github.com/vllm-project/vllm-omni/issues/7661)
 
 ## When to use this recipe
@@ -34,7 +34,7 @@ user-downloaded weights and bundles none.
 | MoT | NAR path (`nar_self_attn`/`nar_mlp` per layer) shares embed_tokens, final norm and lm_head with the AR path |
 | Frames | Single codebook: one codec token per frame, 25 frames/s, span [151853, 184521) |
 | Sampling | temperature/top-k/top-p + windowed repetition penalty, seeded; model-owned (phase-masked vocab) |
-| Guidance | Off by default (1.0 full/melody, 1.01 off); not exercised in Phase 1 |
+| Guidance | Off by default (1.0 full/melody, 1.01 off); not exercised |
 | Acoustic | 32-step midpoint flow matching over 64-dim latents on the NAR path, chunked ~12k frames |
 | VAE | `m-a-p/YuE2-Vae` decoder-only, tiled (1024 core + 16 halo frames), FP32 |
 | Output | 48 kHz stereo, whole song delivered when the semantic request finishes |
@@ -66,9 +66,9 @@ its own end token; `truncated` in the report line says which happened.
 - **Memory:** ~7.3 GB bf16 weights + KV for 24,576 tokens fits a 24 GB card;
   the terminal NAR/VAE pass peaks around ~7 GB total (naive-reference
   measurement, 200 frames).
-- **Known limitations (Phase 1):** offline only; one song at a time is the
-  verified shape (`max_num_seqs: 4` declared); CUDA graph capture and the
-  `/v1/audio/speech` adapter are follow-ups; the abc phase runs eagerly
+- **Known limitations:** one song at a time is the
+  verified shape (`max_num_seqs: 4` declared); CUDA graph capture is a
+  follow-up; the abc phase runs eagerly
   after prefill (its tokens are the product, not audio).
 - Audio is not expected to match the upstream torch reference bit-for-bit
   (fused vs eager kernels). Measured against the upstream torch reference

@@ -1,5 +1,5 @@
 # YuE2-3B deploy: single-stage native-AR text-to-music (~3.6B bf16 + VAE).
-# Target 1x 24 GB card; verified shape on a busier 96 GB H20.
+# Target 1x 24 GB card; verified on a single RTX 4090.
 #
 # The architectures pin is required: the checkpoint's config.json names
 # "YuE2ForCausalLM" with an auto_map that only makes sense under
