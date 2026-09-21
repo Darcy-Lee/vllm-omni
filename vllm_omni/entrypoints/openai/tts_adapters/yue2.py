@@ -207,7 +207,14 @@ class Yue2Adapter(ARTTSAdapter):
             model_path = resolve_stage_model_path(self.ctx.engine_client)
             if model_path is None:
                 raise RuntimeError("YuE2 tokenizer needs a resolvable stage model path")
-            self._cached_tokenizer = YuE2TextTokenizer(Path(model_path) / "qwen.tiktoken")
+            merge_file = Path(model_path).expanduser() / "qwen.tiktoken"
+            if not merge_file.is_file():
+                # model_path is an HF repo id: pull just the merge file into
+                # the hub cache (vae.py does the same for the VAE snapshot).
+                from vllm_omni.transformers_utils.repo_utils import hf_api
+
+                merge_file = Path(hf_api().hf_hub_download(model_path, "qwen.tiktoken"))
+            self._cached_tokenizer = YuE2TextTokenizer(merge_file)
         return self._cached_tokenizer
 
 

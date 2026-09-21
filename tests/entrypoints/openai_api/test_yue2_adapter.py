@@ -205,3 +205,42 @@ def test_yue2_apply_sampling_overrides_draws_seed_when_absent() -> None:
     second = adapter.apply_sampling_overrides(_stage_defaults(), _request(), prompt=prompt)[0]
     assert isinstance(first.extra_args[KEY_SEED], int)
     assert first.extra_args[KEY_SEED] != second.extra_args[KEY_SEED]
+
+
+def test_yue2_tokenizer_resolves_local_dir_and_hf_id(tmp_path, monkeypatch) -> None:
+    import vllm_omni.entrypoints.openai.tts_adapters.yue2 as yue2_mod
+
+    recorded: list[str] = []
+
+    class _FakeTokenizer:
+        def __init__(self, merge_file) -> None:
+            recorded.append(str(merge_file))
+
+    monkeypatch.setattr("vllm_omni.model_executor.models.yue2.tokenizer.YuE2TextTokenizer", _FakeTokenizer)
+
+    # Local checkpoint dir: the merge file is read in place, no hub call.
+    local_dir = tmp_path / "YuE2-3B"
+    local_dir.mkdir()
+    (local_dir / "qwen.tiktoken").write_bytes(b"")
+    monkeypatch.setattr(yue2_mod, "resolve_stage_model_path", lambda _engine: str(local_dir))
+    local_adapter = _adapter()
+    local_adapter._tokenizer()
+    assert recorded == [str(local_dir / "qwen.tiktoken")]
+
+    # HF repo id: only the merge file is pulled into the hub cache.
+    cached = tmp_path / "hub" / "qwen.tiktoken"
+    cached.parent.mkdir()
+    cached.write_bytes(b"")
+    calls: list[tuple[str, str]] = []
+
+    class _FakeApi:
+        def hf_hub_download(self, repo_id: str, filename: str) -> str:
+            calls.append((repo_id, filename))
+            return str(cached)
+
+    monkeypatch.setattr(yue2_mod, "resolve_stage_model_path", lambda _engine: _MODEL)
+    monkeypatch.setattr("vllm_omni.transformers_utils.repo_utils.hf_api", lambda: _FakeApi())
+    hub_adapter = _adapter()
+    hub_adapter._tokenizer()
+    assert calls == [(_MODEL, "qwen.tiktoken")]
+    assert recorded[-1] == str(cached)
