@@ -463,7 +463,9 @@ class Yue2ForCausalLM(nn.Module):
         """Draw one token per decoding row with the request's own arithmetic."""
         del sampling_metadata
         rows = int(logits.shape[0])
-        token_ids = torch.zeros((rows, 1), dtype=torch.long, device=logits.device)
+        # The runner's input_ids buffer is int32; long ids crash its scatter
+        # when concurrent requests re-index rows.
+        token_ids = torch.zeros((rows, 1), dtype=torch.int32, device=logits.device)
         if not self._step_rows:
             return SamplerOutput(sampled_token_ids=token_ids, logprobs_tensors=None)
 
@@ -571,7 +573,9 @@ class Yue2ForCausalLM(nn.Module):
         mm["sr"].append(torch.tensor(SAMPLE_RATE, dtype=torch.int32))
         meta = mm["meta"]
         meta["req_id"].append(req_id)
-        meta["truncated"].append(str(int(truncated)))
+        # Keep the flag an int, not a str: the wire payload is tensor-only
+        # (_ensure_tensor_values) and a string would be dropped before serving.
+        meta["truncated"].append(int(truncated))
 
     def _vae_model(self, device: torch.device) -> YuE2VAE:
         if self._vae is None:
@@ -584,7 +588,7 @@ class Yue2ForCausalLM(nn.Module):
         return self._vae
 
     def _decode_latents(self, latents: torch.Tensor) -> torch.Tensor:
-        """[frames, 64] FP32 CPU latents -> interleaved stereo [samples, 2]."""
+        """[frames, 64] FP32 CPU latents -> channels-first stereo [2, samples]."""
         device = f"cuda:{torch.accelerator.current_device_index()}" if torch.cuda.is_available() else "cpu"
         model = self._vae_model(torch.device(device))
         z = latents.T.unsqueeze(0)  # [1, 64, T]
@@ -598,7 +602,9 @@ class Yue2ForCausalLM(nn.Module):
         if not torch.isfinite(audio).all():
             raise RuntimeError("VAE produced non-finite audio")
         logger.info("YUE2_AUDIO_PRECLAMP absmax=%.4f", float(audio.abs().max()))
-        return audio[0].float().clamp(-1, 1).T.contiguous().reshape(-1)
+        # Channels-first [2, T], the same layout MiniMax Music 3 ships in
+        # model_outputs; serving's create_audio transposes it for soundfile.
+        return audio[0].float().clamp(-1, 1).contiguous()
 
     def make_omni_output(self, model_outputs: torch.Tensor | OmniOutput, **kwargs: Any) -> OmniOutput:
         if isinstance(model_outputs, OmniOutput):
@@ -622,7 +628,7 @@ class Yue2ForCausalLM(nn.Module):
             "meta": {
                 "req_id": ready,
                 "sparse_audio": ["1"],
-                "truncated": [str(int(truncated[r])) for r in ready],
+                "truncated": [int(truncated[r]) for r in ready],
             },
         }
         # sample() runs after this each step and appends finished songs into

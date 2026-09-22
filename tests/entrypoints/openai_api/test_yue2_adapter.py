@@ -3,8 +3,9 @@
 """CPU tests for the YuE2-3B speech adapter.
 
 Covers detection, the reject matrix (cot/abc coupling, unsupported speech
-contract fields, fixed sampling), max_new_tokens frame bounds, build() parity
-with the offline prompt helper, the context budget, and sampling overrides.
+contract fields, streaming, fixed sampling), max_new_tokens frame bounds,
+build() parity with the offline prompt helper, the context budget, sampling
+overrides, and response-metadata collection.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from vllm_omni.entrypoints.openai.protocol.audio import OpenAICreateSpeechRequest
 from vllm_omni.entrypoints.openai.tts_adapters import detect_tts_model_type, resolve_adapter
@@ -124,6 +126,9 @@ def test_yue2_rejects_cot_without_abc(cot: str, abc) -> None:
         ({"language": "Chinese"}, "language"),
         ({"task_type": "Base"}, "task_type"),
         ({"speed": 1.5}, "speed"),
+        ({"stream": True}, "streaming"),
+        ({"stream_format": "sse"}, "streaming"),
+        ({"stream_format": "audio"}, "streaming"),
         ({"extra_params": {"temperature": 0.3}}, "temperature"),
         ({"extra_params": {"top_p": 0.9}}, "top_p"),
         ({"extra_params": {"top_k": 20}}, "top_k"),
@@ -205,6 +210,46 @@ def test_yue2_apply_sampling_overrides_draws_seed_when_absent() -> None:
     second = adapter.apply_sampling_overrides(_stage_defaults(), _request(), prompt=prompt)[0]
     assert isinstance(first.extra_args[KEY_SEED], int)
     assert first.extra_args[KEY_SEED] != second.extra_args[KEY_SEED]
+
+
+def test_yue2_collect_response_metadata_reads_truncated_flag() -> None:
+    adapter = _adapter()
+    collect: dict = {}
+    adapter.collect_response_metadata({"meta": {"truncated": ["1"]}}, collect)
+    assert collect["audio_truncated"] is True
+    collect.clear()
+    adapter.collect_response_metadata({"meta": {"truncated": ["0"]}}, collect)
+    assert collect["audio_truncated"] is False
+    collect.clear()
+    adapter.collect_response_metadata({"model_outputs": []}, collect)
+    assert "audio_truncated" not in collect
+
+
+def test_yue2_collect_response_metadata_reads_flattened_runner_key() -> None:
+    # The runner flattens meta.* to dotted keys and unwraps the per-request
+    # list before the payload reaches serving (flatten_payload).
+    adapter = _adapter()
+    collect: dict = {}
+    adapter.collect_response_metadata({"meta.truncated": "1"}, collect)
+    assert collect["audio_truncated"] is True
+    collect.clear()
+    adapter.collect_response_metadata({"meta.truncated": "0"}, collect)
+    assert collect["audio_truncated"] is False
+    collect.clear()
+    adapter.collect_response_metadata({"meta.truncated": ["1"]}, collect)
+    assert collect["audio_truncated"] is True
+
+
+def test_yue2_collect_response_metadata_reads_wire_tensor() -> None:
+    # The wire payload is tensor-only (_ensure_tensor_values), so the flag
+    # arrives at serving as a 0-d int tensor under the flattened dotted key.
+    adapter = _adapter()
+    collect: dict = {}
+    adapter.collect_response_metadata({"meta.truncated": torch.tensor(1)}, collect)
+    assert collect["audio_truncated"] is True
+    collect.clear()
+    adapter.collect_response_metadata({"meta.truncated": torch.tensor(0)}, collect)
+    assert collect["audio_truncated"] is False
 
 
 def test_yue2_tokenizer_resolves_local_dir_and_hf_id(tmp_path, monkeypatch) -> None:

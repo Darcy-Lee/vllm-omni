@@ -223,6 +223,8 @@ class TestSampleRows:
         model._step_rows = []
         out = model.sample(logits_for(CODEC_OFFSET + 5), None)
         assert out.sampled_token_ids.shape == (1, 1)
+        # The runner's input_ids buffer is int32; long ids crash its scatter.
+        assert out.sampled_token_ids.dtype == torch.int32
 
 
 class TestCaptureConstants:

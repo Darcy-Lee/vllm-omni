@@ -2172,6 +2172,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 if ts is not None:
                     collect["word_timestamps"] = ts
 
+            # Let the adapter fold engine-side metadata (e.g. YuE2's
+            # meta.truncated) into ``collect`` for response headers.
+            if collect is not None and (adapter := self._get_tts_adapter()) is not None:
+                adapter.collect_response_metadata(audio_output, collect)
+
             audio_tensor = audio_output[audio_key]
             sr_raw = audio_output.get("sr", 24000)
             sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
@@ -2612,6 +2617,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         "(use the WebSocket streaming path for long transcripts)",
                         len(ts_json),
                     )
+            if collect.get("audio_truncated") is not None:
+                headers["X-Audio-Truncated"] = "true" if collect["audio_truncated"] else "false"
             return Response(content=audio_bytes, media_type=media_type, headers=headers)
 
         except asyncio.CancelledError:

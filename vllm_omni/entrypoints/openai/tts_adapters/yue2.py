@@ -20,8 +20,11 @@ the MiniMax Music 3 precedent.
 """
 
 import secrets
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import torch
 
 from vllm_omni.entrypoints.openai.tts_adapters import register_tts_adapter
 from vllm_omni.entrypoints.openai.tts_adapters.base import (
@@ -124,6 +127,11 @@ class Yue2Adapter(ARTTSAdapter):
             return "YuE2 does not support 'task_type'"
         if request.speed is not None and float(request.speed) != 1.0:
             return "YuE2 only supports speed=1.0; put the tempo in 'instructions', e.g. 'at 120 BPM'"
+        if request.is_streaming():
+            return (
+                "YuE2 does not support streaming: the song is decoded in one "
+                "terminal NAR/VAE pass after AR decoding finishes. Use stream=false."
+            )
 
         rejected = sorted(key for key in _UNSUPPORTED_SAMPLING_PARAMS if extra.get(key) is not None)
         if rejected:
@@ -198,6 +206,24 @@ class Yue2Adapter(ARTTSAdapter):
         params.stop_token_ids = list(STOP_TOKEN_IDS)
         params.detokenize = False
         return sampling_params_list
+
+    def collect_response_metadata(self, audio_output: Mapping[str, Any], collect: dict) -> None:
+        """Surface meta.truncated so the caller gets an X-Audio-Truncated header."""
+        # The runner flattens nested meta.* to dotted keys (flatten_payload)
+        # and the wire payload is tensor-only (_ensure_tensor_values), so by
+        # serving time the flag is a 0-d "0"/"1" tensor under "meta.truncated";
+        # accept the nested/offline shapes too.
+        flags = audio_output.get("meta.truncated")
+        if flags is None:
+            meta = audio_output.get("meta")
+            if isinstance(meta, dict):
+                flags = meta.get("truncated")
+        if isinstance(flags, torch.Tensor):
+            flags = flags.reshape(-1)[-1].item() if flags.numel() else None
+        elif isinstance(flags, (list, tuple)):
+            flags = flags[-1] if flags else None
+        if flags is not None:
+            collect["audio_truncated"] = flags is True or str(flags) == "1"
 
     def _tokenizer(self) -> Any:
         """The checkpoint-native tiktoken BPE, loaded once per process."""

@@ -162,10 +162,10 @@ def main() -> None:
     if "truncated" in meta:
         truncated = bool(int(meta["truncated"][0]))
 
-    waveform = audio.reshape(-1, 2).T.unsqueeze(0).float()
+    waveform = audio.float()
     # soundfile wants [frames, channels] float in [-1, 1]; torchaudio has no
     # wheel matching vllm 0.29.0's torch pin, so the driver uses libsndfile.
-    sf.write(args.output, waveform.squeeze(0).T.contiguous(), sr)
+    sf.write(args.output, waveform.T.contiguous(), sr)
     print(
         f"Saved {args.output}: {waveform.shape[-1] / sr:.1f}s @ {sr} Hz stereo, "
         f"truncated={truncated}, generated {len(output.token_ids)} semantic tokens"
