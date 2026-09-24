@@ -218,6 +218,47 @@ class TestSampleRows:
         assert out.sampled_token_ids[0, 0].item() == 0
         assert calls == []
 
+    def test_synthesis_failure_fails_only_that_request(self, finish_calls):
+        """An NAR/VAE exception must not escape sample(): the runner calls
+        model.sample() with no error handling, so one failing request would
+        otherwise kill Stage-0 for every live request."""
+        calls, _recorder = finish_calls
+        model = make_model()
+        model._last_mm = None
+        model._audio_queue = []
+
+        def boom(state, *, hit_end: bool):
+            if state.request_id == "bad":
+                raise torch.OutOfMemoryError("NAR OOM")
+            calls.append((state.request_id, hit_end))
+
+        model._finish_request = boom
+        model._states["good"] = make_state("good")
+        model._states["bad"] = make_state("bad")
+        model._step_rows = [("good", 63, 1), ("bad", 63, 1)]
+        out = model.sample(logits_for(MUSIC_END, MUSIC_END, rows=2), None)
+        assert out.sampled_token_ids[0, 0].item() == MUSIC_END
+        assert out.sampled_token_ids[1, 0].item() == MUSIC_END
+        assert calls == [("good", True)]
+        assert model._states["good"].finished and model._states["bad"].finished
+        # The failed request ships an empty clip flagged as an error, so
+        # serving answers 500 instead of a silent zero-length WAV.
+        errors = {rid: err for rid, _audio, _trunc, err in model._audio_queue}
+        assert errors == {"bad": True}
+
+    def test_failed_audio_rides_make_omni_output_meta(self):
+        """The error flag must survive the queue fallback path into the mm
+        payload; the wire keeps ints (strings are dropped), so meta.error
+        travels as 0/1 next to meta.truncated."""
+        model = make_model()
+        model._last_mm = None
+        model._audio_queue = [("r1", torch.zeros((2, 0)), False, True)]
+        out = model.make_omni_output(torch.zeros(1))
+        meta = out.multimodal_outputs["meta"]
+        assert meta["error"] == [1]
+        assert meta["truncated"] == [0]
+        assert model._audio_queue == []
+
     def test_empty_step_returns_neutral_tokens(self):
         model = make_model()
         model._step_rows = []

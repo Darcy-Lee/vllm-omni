@@ -42,7 +42,7 @@ user-downloaded weights and bundles none.
 Generation is one or two requests on a single AR stage: the abc phase writes
 the score, the semantic phase generates codec frames and, on its last step,
 solves the ODE and decodes the whole song in-engine (weights load once; the
-VAE loads lazily from `$YUE2_VAE` or the hub id).
+VAE loads at startup from `$YUE2_VAE` or the hub id).
 
 ## Running
 
@@ -63,11 +63,13 @@ its own end token; `truncated` in the report line says which happened.
 
 ## Notes
 
-- **Memory:** ~7.3 GB bf16 weights + KV for 24,576 tokens fits a 24 GB card;
-  the terminal NAR/VAE pass peaks around ~7 GB total (naive-reference
-  measurement, 200 frames).
-- **Known limitations:** one song at a time is the
-  verified shape (`max_num_seqs: 4` declared); CUDA graph capture is a
+- **Memory (RTX 4090, 24 GB, `gpu_memory_utilization: 0.70`):** the engine
+  reserves ~15.8 GiB after startup; with 4 concurrent requests pinned to the
+  9000-frame cap (worst case), peak usage during the terminal NAR/VAE
+  finishing pass reaches ~20.9 GiB, leaving ~3 GiB of headroom. At 0.85 the
+  same workload OOMs inside the finishing pass, so the deploy yaml pins 0.70.
+- **Known limitations:** 4 concurrent full-length requests are the verified
+  shape (`max_num_seqs: 4`); CUDA graph capture is a
   follow-up; the abc phase runs eagerly
   after prefill (its tokens are the product, not audio).
 - Audio is not expected to match the upstream torch reference bit-for-bit

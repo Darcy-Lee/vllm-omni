@@ -207,23 +207,36 @@ class Yue2Adapter(ARTTSAdapter):
         params.detokenize = False
         return sampling_params_list
 
-    def collect_response_metadata(self, audio_output: Mapping[str, Any], collect: dict) -> None:
-        """Surface meta.truncated so the caller gets an X-Audio-Truncated header."""
-        # The runner flattens nested meta.* to dotted keys (flatten_payload)
-        # and the wire payload is tensor-only (_ensure_tensor_values), so by
-        # serving time the flag is a 0-d "0"/"1" tensor under "meta.truncated";
-        # accept the nested/offline shapes too.
-        flags = audio_output.get("meta.truncated")
+    @staticmethod
+    def _last_meta_flag(audio_output: Mapping[str, Any], name: str) -> Any:
+        """Read a per-request 0/1 meta flag in all three wire shapes.
+
+        The runner flattens nested meta.* to dotted keys (flatten_payload)
+        and the wire payload is tensor-only (_ensure_tensor_values), so by
+        serving time the flag is usually a 0-d "0"/"1" tensor under a dotted
+        key; accept the nested/offline shapes too.
+        """
+        flags = audio_output.get(f"meta.{name}")
         if flags is None:
             meta = audio_output.get("meta")
             if isinstance(meta, dict):
-                flags = meta.get("truncated")
+                flags = meta.get(name)
         if isinstance(flags, torch.Tensor):
             flags = flags.reshape(-1)[-1].item() if flags.numel() else None
         elif isinstance(flags, (list, tuple)):
             flags = flags[-1] if flags else None
-        if flags is not None:
-            collect["audio_truncated"] = flags is True or str(flags) == "1"
+        return flags
+
+    def collect_response_metadata(self, audio_output: Mapping[str, Any], collect: dict) -> None:
+        """Surface meta.truncated / meta.error as response headers."""
+        truncated = self._last_meta_flag(audio_output, "truncated")
+        if truncated is not None:
+            collect["audio_truncated"] = truncated is True or str(truncated) == "1"
+        # meta.error=1 marks a failed NAR/VAE pass (empty clip); serving turns
+        # it into a 500 via this generic key. Absent/0 means success.
+        error = self._last_meta_flag(audio_output, "error")
+        if error is not None and (error is True or str(error) == "1"):
+            collect["audio_synthesis_error"] = True
 
     def _tokenizer(self) -> Any:
         """The checkpoint-native tiktoken BPE, loaded once per process."""

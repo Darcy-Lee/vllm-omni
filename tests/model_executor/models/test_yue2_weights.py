@@ -137,3 +137,57 @@ def test_nar_name_without_layer_prefix_is_left_alone():
     # elsewhere must not crash or be mangled (it will fail strict load loudly).
     ar, side = partition_checkpoint_weights([("other.nar_thing.weight", _t())])
     assert [n for n, _ in side] == ["other.nar_thing.weight"]
+
+
+def test_load_weights_loads_the_vae_eagerly(monkeypatch):
+    """The VAE must load inside load_weights, not lazily at the first
+    finishing request: a bad path or failed download then surfaces at
+    startup, and the decoder weights sit on the GPU before vLLM's memory
+    profiling sizes the KV cache."""
+    from types import SimpleNamespace
+
+    import vllm_omni.model_executor.models.yue2.yue2 as yue2_mod
+
+    model = object.__new__(yue2_mod.Yue2ForCausalLM)
+    monkeypatch.setattr(
+        yue2_mod,
+        "partition_checkpoint_weights",
+        lambda _w: ([("ar.weight", _t())], [("side.weight", _t())]),
+    )
+    monkeypatch.setattr(
+        yue2_mod,
+        "AutoWeightsLoader",
+        lambda _m: SimpleNamespace(load_weights=lambda pairs: {n for n, _ in pairs}),
+    )
+    model.load_state_dict = lambda _sd, strict=False: ([], [])
+    vae_calls: list[torch.device] = []
+
+    def _fake_vae_model(device: torch.device) -> object:
+        vae_calls.append(device)
+        return object()
+
+    model._vae_model = _fake_vae_model
+
+    loaded = model.load_weights(iter([]))
+    assert loaded == {"ar.weight", "side.weight"}
+    assert len(vae_calls) == 1
+
+
+def test_vae_stays_out_of_the_module_tree(monkeypatch):
+    """The checkpoint has no VAE keys: a registered ``_vae`` submodule would
+    be flagged as uninitialized by DefaultModelLoader.track_weights_loading,
+    and a model-wide dtype/device pass would silently change VAE numerics."""
+    import vllm_omni.model_executor.models.yue2.yue2 as yue2_mod
+
+    model = object.__new__(yue2_mod.Yue2ForCausalLM)
+    torch.nn.Module.__init__(model)
+    model._vae = None
+    model._vae_device = None
+    monkeypatch.setattr(
+        yue2_mod.YuE2VAE,
+        "from_pretrained",
+        lambda *_a, **_k: torch.nn.Linear(2, 2),
+    )
+    model._vae_model(torch.device("cpu"))
+    assert isinstance(model._vae, torch.nn.Linear)
+    assert not any(name.startswith("_vae.") for name, _ in model.named_parameters())

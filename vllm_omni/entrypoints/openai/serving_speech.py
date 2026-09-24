@@ -2242,6 +2242,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             if collect is not None and (adapter := self._get_tts_adapter()) is not None:
                 adapter.collect_response_metadata(audio_output, collect)
 
+            # A model can flag a per-request synthesis failure through the
+            # adapter (e.g. YuE2's terminal NAR/VAE pass OOMing on one
+            # request); answer 500 instead of shipping a zero-length WAV.
+            # Raising (not returning a Response) keeps this function's
+            # tuple contract; create_speech maps TTSGenerationError to 500.
+            if collect is not None and collect.get("audio_synthesis_error"):
+                raise TTSGenerationError(
+                    "The model failed to synthesize audio for this request",
+                    retryable=False,
+                )
+
             audio_tensor = audio_output[audio_key]
             sr_raw = audio_output.get("sr", 24000)
             sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw

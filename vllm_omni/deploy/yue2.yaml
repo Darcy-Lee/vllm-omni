@@ -13,7 +13,12 @@ trust_remote_code: true
 stages:
   - stage_id: 0
     max_num_seqs: 4
-    gpu_memory_utilization: 0.85
+    # Measured on a 24 GB RTX 4090 with 4 concurrent requests pinned to the
+    # 9000-frame cap (worst case): the engine reserves ~15.8 GiB at 0.70 and
+    # peak usage during the terminal NAR/VAE finishing pass reaches 20.9 GiB,
+    # leaving ~3 GiB of headroom. 0.85 reserves ~19.4 GiB and the same
+    # workload OOMs inside the finishing pass.
+    gpu_memory_utilization: 0.70
     # Phase 1 keeps the backbone eager: the model-owned sampler runs after the
     # forward, and the terminal NAR/VAE pass runs inside the finishing step.
     # CUDA-graph capture of the standard Qwen3 backbone is a perf follow-up.

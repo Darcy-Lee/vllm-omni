@@ -281,7 +281,7 @@ class Yue2ForCausalLM(nn.Module):
 
         self._states: dict[str, _RequestState] = {}
         self._row_constants: dict[str, _RowConstants] = {}
-        self._audio_queue: list[tuple[str, torch.Tensor, bool]] = []
+        self._audio_queue: list[tuple[str, torch.Tensor, bool, bool]] = []
         self._deferred_cleanup_ids: set[str] = set()
         self._step_rows: list[tuple[str, int, int]] = []  # (req_id, computed, scheduled)
         self._decode_t0: dict[str, float] = {}  # first decode-step wall time, for AR tok/s
@@ -333,6 +333,12 @@ class Yue2ForCausalLM(nn.Module):
 
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(iter(ar_pairs))
+        # Load the VAE now, not lazily at the first finishing request: a bad
+        # path or a failed download must surface at startup, and the decoder
+        # weights must sit on the GPU before vLLM's memory profiling sizes
+        # the KV cache.
+        device = f"cuda:{torch.accelerator.current_device_index()}" if torch.cuda.is_available() else "cpu"
+        self._vae_model(torch.device(device))
         # The NAR/projection modules were populated by hand above;
         # DefaultModelLoader.track_weights_loading diffs every named
         # parameter against the returned set, so the side keys must be
@@ -500,7 +506,7 @@ class Yue2ForCausalLM(nn.Module):
             if token == end:
                 state.finished = True
                 state.truncated = False
-                self._finish_request(state, hit_end=True)
+                self._finish_request_safely(state, hit_end=True)
                 token_ids[row, 0] = end
             else:
                 state.history.append(token)
@@ -508,13 +514,28 @@ class Yue2ForCausalLM(nn.Module):
                 if constants.phase == "semantic" and len(state.history) >= budget:
                     state.finished = True
                     state.truncated = True
-                    self._finish_request(state, hit_end=False)
+                    self._finish_request_safely(state, hit_end=False)
                     token_ids[row, 0] = end
                 else:
                     token_ids[row, 0] = token
         return SamplerOutput(sampled_token_ids=token_ids, logprobs_tensors=None)
 
     # ------------------------------------------------------------ audio
+
+    def _finish_request_safely(self, state: _RequestState, *, hit_end: bool) -> None:
+        """Keep an NAR/VAE failure from escaping ``sample``.
+
+        The runner calls ``model.sample()`` with no error handling, so an
+        exception here (OOM in the ODE solve, non-finite VAE output) would
+        kill Stage-0 and take every live request down with it. Fail only
+        this request: ship an empty error-flagged clip that serving turns
+        into a 500.
+        """
+        try:
+            self._finish_request(state, hit_end=hit_end)
+        except Exception:
+            logger.exception("YuE2 synthesis failed for req=%s; failing only this request", state.request_id)
+            self._ship_audio(state.request_id, torch.zeros((2, 0)), state.truncated, error=True)
 
     def _finish_request(self, state: _RequestState, *, hit_end: bool) -> None:
         """Solve the ODE and decode the song; abc-phase requests skip this."""
@@ -554,7 +575,7 @@ class Yue2ForCausalLM(nn.Module):
         self._ship_audio(state.request_id, audio, state.truncated)
         del hit_end
 
-    def _ship_audio(self, req_id: str, audio: torch.Tensor, truncated: bool) -> None:
+    def _ship_audio(self, req_id: str, audio: torch.Tensor, truncated: bool, *, error: bool = False) -> None:
         """Append the finished song to the CURRENT step's mm payload in place.
 
         make_omni_output already ran for this step (it ships the sparse marker
@@ -567,21 +588,26 @@ class Yue2ForCausalLM(nn.Module):
         mm = self._last_mm
         if mm is None:
             # No forward built a payload this step; fall back to the queue.
-            self._audio_queue.append((req_id, audio, truncated))
+            self._audio_queue.append((req_id, audio, truncated, error))
             return
         mm["model_outputs"].append(audio)
         mm["sr"].append(torch.tensor(SAMPLE_RATE, dtype=torch.int32))
         meta = mm["meta"]
         meta["req_id"].append(req_id)
-        # Keep the flag an int, not a str: the wire payload is tensor-only
+        # Keep the flags ints, not strs: the wire payload is tensor-only
         # (_ensure_tensor_values) and a string would be dropped before serving.
         meta["truncated"].append(int(truncated))
+        meta["error"].append(int(error))
 
     def _vae_model(self, device: torch.device) -> YuE2VAE:
         if self._vae is None:
             vae_path = os.environ.get("YUE2_VAE", DEFAULT_VAE_ID)
             logger.info("Loading YuE2 VAE decoder from %s", vae_path)
-            self._vae = YuE2VAE.from_pretrained(vae_path, decoder_only=True, device="cpu")
+            # Keep the VAE out of the module tree (__dict__, not an nn.Module
+            # attribute): the checkpoint has no VAE keys, so a registered
+            # submodule would trip DefaultModelLoader.track_weights_loading,
+            # and a model-wide dtype/device pass would change VAE numerics.
+            self.__dict__["_vae"] = YuE2VAE.from_pretrained(vae_path, decoder_only=True, device="cpu")
         if self._vae_device != device:
             self._vae.to(device)
             self._vae_device = device
@@ -611,9 +637,11 @@ class Yue2ForCausalLM(nn.Module):
             return model_outputs
         by_req: dict[str, torch.Tensor] = {}
         truncated: dict[str, bool] = {}
-        for req_id, audio, is_truncated in self._audio_queue:
+        failed: dict[str, bool] = {}
+        for req_id, audio, is_truncated, is_error in self._audio_queue:
             by_req[req_id] = audio
             truncated[req_id] = is_truncated
+            failed[req_id] = is_error
         self._audio_queue.clear()
         ready = list(by_req)
         sr = torch.tensor(SAMPLE_RATE, dtype=torch.int32)
@@ -629,6 +657,7 @@ class Yue2ForCausalLM(nn.Module):
                 "req_id": ready,
                 "sparse_audio": ["1"],
                 "truncated": [int(truncated[r]) for r in ready],
+                "error": [int(failed[r]) for r in ready],
             },
         }
         # sample() runs after this each step and appends finished songs into

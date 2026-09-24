@@ -252,6 +252,29 @@ def test_yue2_collect_response_metadata_reads_wire_tensor() -> None:
     assert collect["audio_truncated"] is False
 
 
+def test_yue2_collect_response_metadata_reads_error_flag() -> None:
+    # The model flags a failed NAR/VAE pass with meta.error=1 (int, so the
+    # tensor-only wire keeps it); serving turns it into a 500 via the generic
+    # audio_synthesis_error collect key, same shapes as meta.truncated.
+    adapter = _adapter()
+    collect: dict = {}
+    adapter.collect_response_metadata({"meta": {"error": ["1"]}}, collect)
+    assert collect["audio_synthesis_error"] is True
+    collect.clear()
+    adapter.collect_response_metadata({"meta.error": "1"}, collect)
+    assert collect["audio_synthesis_error"] is True
+    collect.clear()
+    adapter.collect_response_metadata({"meta.error": torch.tensor(1)}, collect)
+    assert collect["audio_synthesis_error"] is True
+    collect.clear()
+    # No flag (or an explicit 0) means success: the key stays absent so the
+    # generic serving check does not fire on healthy requests.
+    adapter.collect_response_metadata({"meta.error": torch.tensor(0)}, collect)
+    assert "audio_synthesis_error" not in collect
+    adapter.collect_response_metadata({"meta.truncated": "1"}, collect)
+    assert "audio_synthesis_error" not in collect
+
+
 def test_yue2_tokenizer_resolves_local_dir_and_hf_id(tmp_path, monkeypatch) -> None:
     import vllm_omni.entrypoints.openai.tts_adapters.yue2 as yue2_mod
 
