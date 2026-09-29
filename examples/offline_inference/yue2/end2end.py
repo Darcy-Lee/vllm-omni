@@ -25,7 +25,7 @@ from pathlib import Path
 import soundfile as sf
 
 from vllm_omni import Omni
-from vllm_omni.model_executor.models.yue2.constants import (
+from vllm_omni.model_executor.models.yue2.yue2 import (
     ABC_SAMPLING,
     KEY_MAX_AUDIO_FRAMES,
     KEY_MIN_TOKENS,
@@ -41,12 +41,12 @@ from vllm_omni.model_executor.models.yue2.constants import (
     SEMANTIC_SAMPLING,
     STOP_TOKEN_IDS,
 )
-from vllm_omni.model_executor.models.yue2.prompt import (
+from vllm_omni.tokenizers.yue2_prompt import (
     abc_ids_from_generated,
     abc_prefix_ids,
     semantic_prefix_ids,
 )
-from vllm_omni.model_executor.models.yue2.tokenizer import YuE2TextTokenizer
+from vllm_omni.tokenizers.yue2_tokenizer import YuE2TextTokenizer
 
 
 def sampling_params(engine, *, phase, seed, max_frames, prompt_ids):
@@ -109,7 +109,7 @@ def main() -> None:
         os.environ["YUE2_VAE"] = args.vae
 
     tokenizer = YuE2TextTokenizer(Path(args.model) / "qwen.tiktoken")
-    engine_kwargs: dict = {"trust_remote_code": True}
+    engine_kwargs: dict = {}
     if args.gpu_memory_utilization is not None:
         engine_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
     engine = Omni(model=args.model, **engine_kwargs)

@@ -32,7 +32,7 @@ from vllm_omni.entrypoints.openai.tts_adapters.base import (
     PreparedRequest,
     resolve_stage_model_path,
 )
-from vllm_omni.model_executor.models.yue2.constants import (
+from vllm_omni.model_executor.models.yue2.yue2 import (
     CONTEXT,
     FRAMES_PER_SECOND,
     KEY_MAX_AUDIO_FRAMES,
@@ -49,15 +49,16 @@ from vllm_omni.model_executor.models.yue2.constants import (
     SEMANTIC_SAMPLING,
     STOP_TOKEN_IDS,
 )
-from vllm_omni.model_executor.models.yue2.prompt import semantic_prefix_ids
+from vllm_omni.tokenizers.yue2_prompt import semantic_prefix_ids
 
 if TYPE_CHECKING:
     from vllm_omni.entrypoints.openai.protocol.audio import OpenAICreateSpeechRequest
 
 _COT_MODES = ("off", "melody", "full")
 
-# Same default as the deploy yaml's yue2_max_audio_frames placeholder.
-_DEFAULT_MAX_FRAMES = 200
+# Without max_new_tokens the budget is the preset ceiling, so the model's
+# own end token sets the song length (upstream reference behavior).
+_DEFAULT_MAX_FRAMES = int(SEMANTIC_SAMPLING["max_tokens"])
 
 # Sampling is fixed by the checkpoint's reference preset. Accepting these
 # would imply a control the model does not honor.
@@ -137,6 +138,12 @@ class Yue2Adapter(ARTTSAdapter):
         if rejected:
             return "YuE2 has fixed sampling and does not accept: " + ", ".join(rejected)
         return None
+
+    async def warmup(self) -> None:
+        # Resolve (and possibly download) qwen.tiktoken at startup: build()
+        # runs on the request path and must not block on a hub download, and a
+        # bad path should surface before the first request.
+        self._tokenizer()
 
     async def build(
         self,
@@ -241,7 +248,7 @@ class Yue2Adapter(ARTTSAdapter):
     def _tokenizer(self) -> Any:
         """The checkpoint-native tiktoken BPE, loaded once per process."""
         if self._cached_tokenizer is None:
-            from vllm_omni.model_executor.models.yue2.tokenizer import YuE2TextTokenizer
+            from vllm_omni.tokenizers.yue2_tokenizer import YuE2TextTokenizer
 
             model_path = resolve_stage_model_path(self.ctx.engine_client)
             if model_path is None:

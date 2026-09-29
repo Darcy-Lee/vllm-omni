@@ -11,9 +11,10 @@ score (generated or user-supplied) and continues from ``MUSIC_START``.
 
 from __future__ import annotations
 
-from .constants import (
+from vllm_omni.model_executor.models.yue2.yue2 import (
     ABC_END,
     ABC_START,
+    CODEC_OFFSET,
     EOD,
     MUSIC_END,
     MUSIC_START,
@@ -79,7 +80,6 @@ def abc_ids_from_generated(generated: list[int]) -> list[int]:
 
 def semantic_frames(generated: list[int]) -> list[int]:
     """Codec frame values (0..CODEC_SIZE-1) from semantic-phase output."""
-    from .constants import CODEC_OFFSET
 
     ids = list(generated)
     if ids and ids[-1] == MUSIC_END:

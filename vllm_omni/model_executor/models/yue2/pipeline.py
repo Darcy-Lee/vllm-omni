@@ -7,8 +7,8 @@ Mixture-of-Transformers checkpoint — AR path, NAR path, projection heads —
 lives in one ``model.safetensors``, so both the autoregressive sampling and
 the terminal flow-matching + VAE pass run inside one stage and no weights are
 duplicated across stages. The VAE decoder is a separate repository
-(``m-a-p/YuE2-Vae``) loaded lazily at the first song finish, from
-``$YUE2_VAE`` or the default hub id.
+(``m-a-p/YuE2-Vae``), loaded in ``load_weights`` from ``$YUE2_VAE`` or the
+default hub id.
 
 Sampling is model-owned. ``sampling_constraints`` pins ``detokenize`` and the
 union of both phase end tokens; ``extra_args`` carry the phase and the
@@ -23,7 +23,7 @@ from vllm_omni.config.stage_config import (
     StagePipelineConfig,
 )
 
-from .constants import STOP_TOKEN_IDS
+from .yue2 import STOP_TOKEN_IDS
 
 YUE2_PIPELINE = PipelineConfig(
     model_type="yue2",

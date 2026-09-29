@@ -4,11 +4,12 @@
 # The architectures pin is required: the checkpoint's config.json names
 # "YuE2ForCausalLM" with an auto_map that only makes sense under
 # trust_remote_code, so the deploy pins vLLM to this package's model class.
-# model_type stays "yue2" so the registered Yue2Config is used.
+# model_type stays "yue2" so the registered Yue2Config is used; no
+# trust_remote_code is needed (the registered config/model win over the
+# checkpoint's auto_map).
 pipeline: yue2
 async_chunk: false
 dtype: bfloat16
-trust_remote_code: true
 
 stages:
   - stage_id: 0

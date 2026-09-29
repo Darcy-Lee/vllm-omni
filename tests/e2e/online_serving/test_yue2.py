@@ -37,12 +37,16 @@ checkpoints add ~5.5 GB of downloads. Validated on a single RTX 4090
 consumer cards.
 """
 
+import concurrent.futures
+import io
 import json
 import os
 import subprocess
+import wave
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+import httpx
 import pytest
 
 from tests.helpers.mark import hardware_test
@@ -56,6 +60,9 @@ DEFAULT_AUDIO_SPEECH_TIMEOUT_S = 900.0
 # 400 frames = 16 s of song. The byte floor sits far below the observed
 # payload (~3.0 MB of 48 kHz stereo 16-bit) to leave room for an early EOS.
 _FRAMES = 400
+# Concurrent pair stays short: it exists to exercise row re-indexing, not
+# to double the wall time.
+_CONCURRENT_FRAMES = 250
 _MIN_BYTES = 1_000_000
 
 LYRICS = "一闪一闪亮晶晶\n满天都是小星星\n挂在天空放光明\n好像千万小眼睛"
@@ -76,11 +83,48 @@ tts_server_params = [
         OmniServerParams(
             model=MODEL,
             stage_config_path=get_deploy_config_path("yue2.yaml"),
-            server_args=["--trust-remote-code", "--disable-log-stats"],
+            server_args=["--disable-log-stats"],
         ),
         id="yue2",
     )
 ]
+
+
+def _http_speech(omni_server, *, seed: int, frames: int) -> bytes:
+    """Raw-HTTP speech request returning (and structurally checking) the WAV.
+
+    The OpenAI SDK client swallows response headers, so the truncation flag is
+    cross-checked here: ``X-Audio-Truncated`` must agree with the audio — the
+    full frame budget (a 25 frames/s song of exactly frames/25 seconds) means
+    truncated, a shorter song means a natural end token.
+    """
+    response = httpx.post(
+        f"http://{omni_server.host}:{omni_server.port}/v1/audio/speech",
+        json={
+            "model": omni_server.model,
+            "input": LYRICS,
+            "instructions": CAPTION,
+            "seed": seed,
+            "max_new_tokens": frames,
+            "stream": False,
+            "response_format": "wav",
+            "extra_params": {"cot": "off"},
+        },
+        timeout=DEFAULT_AUDIO_SPEECH_TIMEOUT_S,
+    )
+    assert response.status_code == 200, response.text[:500]
+    truncated = response.headers.get("X-Audio-Truncated")
+    assert truncated in ("true", "false"), f"X-Audio-Truncated missing/invalid: {truncated!r}"
+    audio = response.content
+    with wave.open(io.BytesIO(audio)) as wav:
+        assert wav.getnchannels() == 2
+        assert wav.getframerate() == 48000
+        duration = wav.getnframes() / wav.getframerate()
+    hit_budget = duration >= frames / 25 - 0.5
+    assert truncated == ("true" if hit_budget else "false"), (
+        f"X-Audio-Truncated={truncated} but duration={duration:.2f}s vs {frames / 25:.1f}s budget"
+    )
+    return audio
 
 
 @pytest.mark.slow
@@ -121,8 +165,38 @@ def test_yue2_metal_twinkle_001(omni_server, openai_client, tmp_path) -> None:
 
     metal_path = tmp_path / "metal.wav"
     control_path = tmp_path / "control.wav"
-    metal_path.write_bytes(_request({"cot": "melody", "abc": golden_abc}))
-    control_path.write_bytes(_request({"cot": "off"}))
+    metal_bytes = _request({"cot": "melody", "abc": golden_abc})
+    control_bytes = _request({"cot": "off"})
+    metal_path.write_bytes(metal_bytes)
+    control_path.write_bytes(control_bytes)
+
+    # CI runs without the verification assets, so the structural checks below
+    # are the only guard against the two real bugs this PR fixed during review:
+    # mono/half-speed output (WAV header + duration bounds) and the int32
+    # crash under concurrent row re-indexing (two simultaneous requests).
+    # Duration bounds: the end token is masked for the first 200 steps
+    # (min_tokens), and the 400-frame budget caps the song, so a healthy
+    # request lands in [8, 16.5] s; the half-speed bug produced ~32 s.
+    for label, audio in (("metal", metal_bytes), ("control", control_bytes)):
+        with wave.open(io.BytesIO(audio)) as wav:
+            assert wav.getnchannels() == 2, f"{label}: {wav.getnchannels()} channels, want stereo"
+            assert wav.getframerate() == 48000, f"{label}: {wav.getframerate()} Hz, want 48 kHz"
+            duration = wav.getnframes() / wav.getframerate()
+            assert _FRAMES / 50 <= duration <= _FRAMES / 25 + 0.5, (
+                f"{label}: {duration:.2f}s outside [{_FRAMES / 50}, {_FRAMES / 25 + 0.5}]s"
+            )
+
+    # A pinned-seed request must flag truncation consistently with the audio
+    # (see _http_speech); the OpenAI SDK response does not expose headers.
+    _http_speech(omni_server, seed=SEED, frames=_FRAMES)
+
+    # Two concurrent requests with different seeds: both must succeed and
+    # produce different songs (the model-owned sampler re-indexes rows across
+    # concurrent requests; a dtype mismatch here crashed the engine before).
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_http_speech, omni_server, seed=SEED + i, frames=_CONCURRENT_FRAMES) for i in range(2)]
+        pair = [f.result() for f in futures]
+    assert pair[0] != pair[1], "different seeds produced identical audio"
 
     # Without the verification assets the structural assertions above
     # (non-empty payload, byte floor) are the whole test — pass on them.

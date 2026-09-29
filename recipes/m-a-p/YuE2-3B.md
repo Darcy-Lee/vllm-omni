@@ -58,8 +58,12 @@ And I keep on walking" \
     --cot full --seed 831001 --max-frames 200 --output song.wav
 ```
 
-`--max-frames 200` caps the song at 8 s (25 frames/s). The song also ends on
-its own end token; `truncated` in the report line says which happened.
+`--max-frames 200` caps the song at 8 s (25 frames/s). The end token is
+masked for the preset's first 200 steps, so a 200-frame budget always
+truncates; a longer budget lets the song end on its own end token, and
+`truncated` in the report line says which happened. Serving follows the
+same rule: omit `max_new_tokens` (or set it above 200) for a natural
+ending.
 
 ## Notes
 

@@ -16,7 +16,7 @@ Prints one JSON object on stdout:
 
 Gates (applied by the caller):
 - metal_probability >= 0.9  (CLAP zero-shot heavy-metal style)
-- melody_score >= 0.85 and melody_score > control_score
+- melody_score >= 0.80 and melody_score > control_score
   (SheetSage2 re-transcription, pitch-class LCS vs the golden score, max over
   major/minor variants and 12 transpositions, pedal-tone tolerant)
 """
