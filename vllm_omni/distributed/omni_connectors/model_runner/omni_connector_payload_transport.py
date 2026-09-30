@@ -1280,11 +1280,12 @@ class _OmniConnectorPayloadTransportMixin(_OmniConnectorRuntimeMixin):
             payload_kwarg: pooling_output,
             "request": request,
         }
-        supports_is_finished = getattr(
-            self,
-            "_custom_process_supports_is_finished",
-            self._custom_process_supports_is_finished_kwarg(),
-        )
+        # The signature check is cached at initialization; never re-inspect
+        # the hook for every request of every model step.
+        supports_is_finished = getattr(self, "_custom_process_supports_is_finished", None)
+        if supports_is_finished is None:
+            supports_is_finished = self._custom_process_supports_is_finished_kwarg()
+            self._custom_process_supports_is_finished = supports_is_finished
         is_finished_fn = getattr(request, "is_finished", None)
         if callable(is_finished_fn):
             try:

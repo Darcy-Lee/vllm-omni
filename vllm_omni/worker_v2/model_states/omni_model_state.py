@@ -17,6 +17,7 @@ import inspect
 import threading
 import types
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, cast
 
 import numpy as np
@@ -26,10 +27,12 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_omni.model_executor.models.output_templates import OmniOutput, OwnedBatchTensor
 from vllm_omni.platforms import current_omni_platform
@@ -412,6 +415,36 @@ class OmniModelState(DefaultModelState):
     # ------------------------------------------------------------------
     # Input preparation
     # ------------------------------------------------------------------
+
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        cudagraph_mode: CUDAGraphMode,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
+        ubatch_idx: int = 0,
+    ) -> dict[str, Any]:
+        if for_capture and input_batch.max_query_len is None:
+            # vLLM 0.30 distributes dummy tokens evenly across requests. For
+            # an unconstrained FULL graph that split is not a query-length
+            # bound: replay may put the entire token bucket in one request.
+            # Attention launch parameters are fixed at capture, so use the
+            # bucket's worst-case query length, not the dummy per-row length.
+            # Keep explicit bounds (e.g. varlen decode) and runtime metadata.
+            input_batch = replace(input_batch, max_query_len=input_batch.num_tokens)
+        return super().prepare_attn(
+            input_batch,
+            cudagraph_mode,
+            block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=for_capture,
+            ubatch_idx=ubatch_idx,
+        )
 
     def prepare_inputs_embeds(
         self,

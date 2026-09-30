@@ -1655,7 +1655,9 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
         model_config = getattr(self, "model_config", None)
         if model_config is None:
             model_config = getattr(getattr(self, "vllm_config", None), "model_config", None)
-        if not bool(getattr(model_config, "async_chunk", False)):
+        if not bool(getattr(model_config, "async_chunk", False)) and not self._model_omni_flag(
+            getattr(self, "model", None), "supports_async_whole_payload"
+        ):
             return False
         if bool(getattr(model_config, "enable_return_routed_experts", False)):
             return False
@@ -2110,6 +2112,14 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
                 scheduler_output.total_num_scheduled_tokens,
             )
 
+        post_sample_mm = getattr(getattr(self, "model", None), "post_sample_multimodal_outputs", None)
+        if callable(post_sample_mm):
+            multimodal_outputs = post_sample_mm(
+                req_ids=req_ids_output_copy,
+                invalid_req_indices=invalid_req_indices,
+                multimodal_outputs=multimodal_outputs,
+            )
+
         multimodal_outputs = self._run_post_sample_talker_mtp(
             req_ids=req_ids_output_copy,
             valid_sampled_token_ids=valid_sampled_token_ids,
@@ -2184,12 +2194,18 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin, Duplex
             if output_tensor_snapshot.async_payload is not None:
                 with record_function_or_nullcontext("omni_async_output:wait_cpu_payload"):
                     output_tensor_snapshot.async_payload.wait()
+            mm_snapshot = output_tensor_snapshot.multimodal_outputs
+            finalize_snapshot = getattr(
+                getattr(self, "model", None), "finalize_multimodal_outputs_from_cpu_snapshot", None
+            )
+            if callable(finalize_snapshot):
+                mm_snapshot = finalize_snapshot(mm_snapshot)
             with record_function_or_nullcontext("omni_output_builder:total"):
                 output = self._build_omni_model_runner_output_from_snapshot(
                     scheduler_output=scheduler_output_snapshot,
                     hidden_states=output_tensor_snapshot.hidden_states,
                     staged_hidden_states_cpu=output_tensor_snapshot.staged_hidden_states_cpu,
-                    multimodal_outputs=output_tensor_snapshot.multimodal_outputs,
+                    multimodal_outputs=mm_snapshot,
                     req_ids_output_copy=req_ids_output_snapshot,
                     req_id_to_index_output_copy=req_id_to_index_output_snapshot,
                     valid_sampled_token_ids=valid_sampled_token_ids_snapshot,
