@@ -231,8 +231,12 @@ def _cfm_inputs(
     time_emb = torch.randn(batch_size, 1, hidden, device=device)
     cnn_cache = torch.randn(depth, batch_size, hidden, 2, device=device)
     att_cache = torch.randn(depth, batch_size, 1, old_att_len, hidden, device=device)
-    cnn_out = torch.empty(depth, batch_size, hidden, 2, device=device)
-    att_out = torch.empty(depth, batch_size, 1, old_att_len + chunk_size, hidden, device=device)
+    # The fake estimator only fills ``att_out[:, :, :, :chunk_size]``. The tail
+    # is the previous cache slot and is not written. ``empty`` leaves it
+    # uninitialized, so eager and replay compare different garbage and CI
+    # fails when that garbage is NaN.
+    cnn_out = torch.zeros(depth, batch_size, hidden, 2, device=device)
+    att_out = torch.zeros(depth, batch_size, 1, old_att_len + chunk_size, hidden, device=device)
     return estimator_input, time_emb, cnn_cache, att_cache, cnn_out, att_out
 
 
