@@ -939,7 +939,9 @@ class YuE2VAE(PreTrainedModel):
         path = path / subfolder
         if config is None:
             config = YuE2VAEConfig.from_pretrained(path, local_files_only=True)
-        model = cls(config, decoder_only=decoder_only)
+        # vLLM may construct us under a BF16 default dtype. Widen before copying
+        # the FP32 checkpoint so load_state_dict does not round its values.
+        model = cls(config, decoder_only=decoder_only).float()
         index = path / "model.safetensors.index.json"
         if index.exists():
             mapping = json.loads(index.read_text())["weight_map"]

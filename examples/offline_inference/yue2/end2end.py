@@ -23,6 +23,7 @@ import copy
 from pathlib import Path
 
 import soundfile as sf
+import torch
 
 from vllm_omni import Omni
 from vllm_omni.model_executor.models.yue2.yue2 import (
@@ -160,7 +161,7 @@ def main() -> None:
     truncated = False
     meta = mm.get("meta") or {}
     if "truncated" in meta:
-        truncated = bool(int(meta["truncated"][0]))
+        truncated = bool(torch.as_tensor(meta["truncated"]).reshape(-1)[-1].item())
 
     waveform = audio.float()
     # soundfile wants [frames, channels] float in [-1, 1]; torchaudio has no
