@@ -208,8 +208,8 @@ OMNI_PIPELINES: dict[str, PipelineConfig | PipelineResolverFunc] = {
     "step_audio_2_asr": STEP_AUDIO2_ASR_PIPELINE,
     "voxcpm2": VOXCPM2_PIPELINE,
     "voxtral_tts": VOXTRAL_TTS_PIPELINE,
-    "yue2": YUE2_PIPELINE,
     "wan2_2_ti2v": WAN2_2_TI2V_PIPELINE,
+    "yue2": YUE2_PIPELINE,
 }
 
 

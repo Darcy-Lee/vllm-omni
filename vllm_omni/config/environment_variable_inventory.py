@@ -189,6 +189,7 @@ _MODEL_PROMOTE = (
     "VLLM_OMNI_SEEDVR2_SHARDED_CLIP_PIXELS",
     "VLLM_OMNI_SEEDVR2_SHARDED_FRAME_PIXELS",
     "VLLM_OMNI_SENSENOVA_PAGED_DECODE",
+    "YUE2_VAE",  # VAE checkpoint selection belongs in typed model configuration.
 )
 
 _MODEL_REQUEST_SCOPE = (
