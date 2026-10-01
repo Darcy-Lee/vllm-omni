@@ -681,7 +681,9 @@ class TestCodePredictorGraphReplay:
             sampling_mode="per_call",
             return_proj_buf=False,
         )
+        predictor._frame_cache = None
         predictor._prefix_graphs_enabled = False
+        predictor._prefix_reprefill_enabled = False
         predictor._bucket_pos_ids = {1: torch.arange(4).unsqueeze(0)}
         graph = mocker.Mock()
         graph_output = torch.zeros(1, 4, 4)
@@ -1362,3 +1364,71 @@ class TestCodePredictorFusedProjections:
 
         with pytest.raises(RuntimeError, match="missing fused parameters"):
             model.load_weights(weights)
+
+
+class TestMTPExecutionBuckets:
+    """Outer MRv2 MTP graph buckets must align with the predictor bucket set."""
+
+    def test_configure_mtp_execution_buckets(self, mocker: MockerFixture, loaded_target_classes) -> None:
+        _ = loaded_target_classes
+        common_mod = sys.modules["vllm_omni.model_executor.models.common.qwen3_code_predictor"]
+        mocker.patch.object(common_mod.current_omni_platform, "is_npu", return_value=False)
+
+        cp_config, _ = _make_tiny_config(loaded_target_classes)
+        vllm_config = _make_vllm_config(mocker, max_num_seqs=4)
+        wrapper = common_mod.CodePredictorWrapper(
+            vllm_config=vllm_config,
+            cp_config=cp_config,
+            wrapper_config=common_mod.CodePredictorWrapperConfig(use_cuda_graphs=False),
+            talker_hidden_size=cp_config.hidden_size,
+        )
+
+        # Default keeps the legacy power-of-two derivation.
+        assert wrapper._execution_batch_buckets is None
+        assert wrapper._batch_bucket_sizes() == [1, 2, 4]
+
+        wrapper.configure_mtp_execution_buckets([3, 1, 3, 0, 9])
+        assert wrapper._batch_bucket_sizes() == [1, 3, 4]  # deduplicate/filter declaration and retain max
+
+        with pytest.raises(RuntimeError, match="before the first warmup"):
+            wrapper2 = common_mod.CodePredictorWrapper(
+                vllm_config=vllm_config,
+                cp_config=cp_config,
+                wrapper_config=common_mod.CodePredictorWrapperConfig(use_cuda_graphs=False),
+                talker_hidden_size=cp_config.hidden_size,
+            )
+            wrapper2._bucket_sizes = [1, 2, 4]  # stand-in for warmed-up state
+            wrapper2.configure_mtp_execution_buckets([3])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_tts_cache_falls_back_on_cpu(mocker, loaded_target_classes, enabled):
+    cp_config, talker_config = _make_tiny_config(loaded_target_classes)
+    cfg = _make_vllm_config(mocker)
+    cfg.model_config.stage_connector_config = {"extra": {"code_predictor_kv_cache": enabled}}
+    predictor = loaded_target_classes[2](vllm_config=cfg, config=cp_config, talker_config=talker_config)
+    common = sys.modules["vllm_omni.model_executor.models.common.qwen3_code_predictor"]
+    setup = mocker.patch.object(common.CodePredictorWrapper, "_setup_compile")
+    predictor._setup_compile()
+    setup.assert_called_once_with()
+    assert predictor._frame_cache is None
+
+
+def test_shared_predictor_ignores_tts_fast_path_options(mocker, loaded_target_classes):
+    cp_config, _ = _make_tiny_config(loaded_target_classes)
+    cfg = _make_vllm_config(mocker)
+    cfg.model_config.stage_connector_config = {
+        "extra": {"code_predictor_kv_cache": True, "code_predictor_fused_sampling": True}
+    }
+    common = sys.modules["vllm_omni.model_executor.models.common.qwen3_code_predictor"]
+    predictor = common.CodePredictorWrapper(
+        vllm_config=cfg,
+        cp_config=cp_config,
+        wrapper_config=common.CodePredictorWrapperConfig(),
+    )
+    assert not hasattr(predictor, "_frame_cache")
+    logits = torch.randn(3, cp_config.vocab_size)
+    uniforms = torch.rand_like(logits)
+    expected = (logits.float() - torch.log(-torch.log(uniforms))).argmax(-1, keepdim=True)
+    actual = predictor._sample_per_call(logits, 1.0, 0, None, uniforms)
+    torch.testing.assert_close(actual, expected)

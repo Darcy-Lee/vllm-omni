@@ -149,7 +149,8 @@ class OmniServeCommand(CLISubcommand):
             args.model_config = model_config
             explicit_keys = getattr(args, "explicit_keys", None)
             if explicit_keys is not None:
-                args.explicit_keys = explicit_keys | {"model_config"}
+                # --no-guardrails is a CLI-only alias, not a diffusion engine arg.
+                args.explicit_keys = (explicit_keys - {"no_guardrails"}) | {"model_config"}
 
         if args.headless:
             run_headless(args)
@@ -790,7 +791,10 @@ class OmniServeCommand(CLISubcommand):
             type=_json_object,
             default=None,
             help=(
-                "JSON object configuring video output preparation, for example '{\"enable_device_postprocess\": true}'."
+                "JSON object configuring video output transport: enable_device_postprocess enables GPU preparation; "
+                "enable_registered_shm enables experimental CUDA-registered SHM for supported video outputs. "
+                "enable_borrowed_frames enables borrowed RGB frames in MP4 response encoding. "
+                "All default to false."
             ),
         )
         omni_config_group.add_argument(
@@ -822,6 +826,17 @@ class OmniServeCommand(CLISubcommand):
             "--vae-use-tiling",
             action="store_true",
             help="Enable VAE tiling for memory optimization (useful for mitigating OOM issues).",
+        )
+        omni_config_group.add_argument(
+            "--vae-fast-path",
+            choices=("off", "lossless", "channels_last"),
+            default="lossless",
+            help=(
+                "Wan VAE decoder fast path. 'lossless' (default) installs bit-exact fused kernels; "
+                "'channels_last' additionally switches decoder convolutions to channels-last memory "
+                "format and fuses RMSNorm+SiLU (faster, not bit-exact); 'off' keeps the reference "
+                "diffusers implementation."
+            ),
         )
 
         # Parallel weight loading (faster diffusion startup)

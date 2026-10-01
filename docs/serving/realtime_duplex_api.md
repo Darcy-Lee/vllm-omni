@@ -8,11 +8,38 @@ history stays honest, and a dropped connection can resume the same session.
 This page covers how to run a duplex deployment, how to drive it from Python
 with `vllm_omni.clients.duplex.DuplexClient`, and the complete wire contract.
 
-The endpoint is served for models that ship a duplex plugin — currently
-MiniCPM-o 4.5 only — and just for deploy configurations that declare
-`session_mode: duplex`. PersonaPlex and Nemotron VoiceChat are ported to the
-plugin contract in follow-up PRs and are not served over this endpoint yet. The runtime architecture
-is described in [Full-Duplex Runtime (MiniCPM-o 4.5)](../design/fullduplex.md).
+The endpoint requires a duplex plugin and a deployment with `session_mode: duplex`.
+See [supported models and deployments](full_duplex_api.md#enable-full-duplex)
+and the [runtime architecture](../design/fullduplex.md).
+
+## Qwen3-Omni conversation history
+
+Qwen3-Omni keeps incoming conversation items independently addressable by item
+ID. Before applying the model's chat template, it merges consecutive user
+items into one multimodal user message. An assistant message, including an
+empty message reserved for an interrupted or unheard answer, separates turns.
+The final user message places media before text instructions, following the
+[official Qwen3-Omni demo's `format_history()`](https://github.com/QwenLM/Qwen3-Omni/blob/e4235853125589c789f06a2dd83e9f4126df5e9d/web_demo.py#L84-L179).
+
+A camera image or text item may arrive after an audio commit and before
+`response.create`. Those items belong to the same pending user turn: the
+committed audio remains associated with its history item even when that item
+is no longer last. Prompt preparation snapshots the selected inputs; later
+items do not modify an already prepared request.
+
+The duplex adapter retains its existing budgets: at most four audio payloads
+(including the current input), an 8 MiB encoded-audio history budget (keeping
+at least the newest payload), and at most eight prompt images. The recent
+16-message window is rounded outwards to a complete turn. If any audio in an
+older turn is no longer retained, the entire turn's model context, including
+its images/text and assistant replies, is omitted. Images from that turn are
+therefore **not** permanent session-wide model context. These limits differ
+from the demo's one image-bearing turn and five audio-bearing turns; the
+shared rule is grouping before pruning, rather than copying its UI budgets.
+
+Grouping and pruning affect only the model-input view. They do not merge or
+delete the source conversation items exposed to clients, and do not change
+playback acknowledgement or interruption handling.
 
 ## Quick Start
 
@@ -27,7 +54,7 @@ vllm-omni serve openbmb/MiniCPM-o-4_5 \
 ```
 
 `vllm_omni/deploy/minicpmo_4_5.yaml` declares `session_mode: duplex` and
-`duplex_session.max_sessions: 4`. Because the MiniCPM-o 4.5 pipeline declares a
+`duplex_session.max_sessions: 16`. Because the MiniCPM-o 4.5 pipeline declares a
 `duplex_plugin`, `vllm-omni serve` runs it through `DuplexOmni`: the server
 mounts `ws://<host>:8099/v1/realtime?duplex=1` (this page; `ws://<host>:8099/v1/duplex`
 is an alias of the same route), `POST /v1/chat/completions`, `/v1/models` and
@@ -357,9 +384,9 @@ with no OpenAI counterpart.
 
 The event vocabulary is uniform, but several surfaces are gated by the
 `capabilities` object the server returns in `session.created`; a client must
-branch on those flags rather than on the model name. MiniCPM-o 4.5 is the
-only model on the plugin contract today; the other two columns record what
-their integrations advertise once the follow-up PRs port them:
+branch on those flags rather than on the model name. MiniCPM-o 4.5 and
+PersonaPlex are on the plugin contract today; the Nemotron VoiceChat column
+records what its integration advertises once the follow-up PR ports it:
 
 | Capability | MiniCPM-o 4.5 | PersonaPlex | Nemotron VoiceChat | Gated surface |
 | --- | --- | --- | --- | --- |
@@ -374,7 +401,11 @@ their integrations advertise once the follow-up PRs port them:
 Everything else in the catalogue — session lifecycle, heartbeat and event
 acknowledgement, append/commit/clear, the response envelope, playback
 acknowledgement, and the error envelope — behaves identically for every
-model.
+model. Two PersonaPlex specifics follow from its capabilities rather than from
+special-casing: a model with `supports_client_commit=false` auto-responds
+without `extra_body.auto_response`, and `response.cancel` /
+`output_audio_buffer.clear` restart its conversation context (a new Stage 0
+request replays the voice/persona prefill).
 
 ### Compatibility with the OpenAI Realtime protocol
 
@@ -1311,9 +1342,6 @@ them out into typed events before they reach a client.
 
 ## Known Limitations
 
-- Only MiniCPM-o 4.5 is served over this endpoint today; PersonaPlex and
-  Nemotron VoiceChat arrive with the follow-up PRs that port them to the
-  plugin contract.
 - Several surfaces are capability-gated per model (see *Capability
   negotiation by model* above): PersonaPlex does not support session resume,
   barge-in, or audio truncation; Nemotron VoiceChat does not support barge-in

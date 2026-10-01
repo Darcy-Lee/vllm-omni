@@ -171,15 +171,15 @@ class Qwen3OmniMoeForConditionalGeneration(
         # such as the vLLM-text perf benchmark.
         #
         # Default to the thinker: it is the text-generation stage, which is what
-        # a non-staged run of this model is asking for. Same shape as
-        # dynin_omni ("token2text") and glm_tts ("glm_tts"). An explicitly wrong
-        # value still reaches the ValueError below rather than being silently
-        # accepted.
+        # a non-staged run of this model is asking for. Same shape as glm_tts
+        # ("glm_tts"). An explicitly wrong value still reaches the ValueError
+        # below rather than being silently accepted.
         self.model_stage = getattr(vllm_config.model_config, "model_stage", None) or "thinker"
         # Staged startup always injects model_stage; its absence means a plain
         # vLLM run with no talker stage downstream, so no one consumes captured
         # thinker layers and the forward must return what stock vLLM expects.
         self.is_staged_run = getattr(vllm_config.model_config, "model_stage", None) is not None
+        self._returns_tuple = self.model_stage == "thinker" and self.is_staged_run
 
         if self.model_stage == "thinker":
             self.use_async_omni_output = True
@@ -1025,7 +1025,7 @@ class Qwen3OmniMoeForConditionalGeneration(
         target_len = thinker_result_ids.shape[-1]
         im_start_indexes = torch.cat(
             (
-                torch.nonzero(input_ids[0] == self.config.im_start_token_id).squeeze(),
+                torch.nonzero(input_ids[0] == self.config.im_start_token_id).squeeze(-1),
                 torch.tensor([target_len], device=input_ids.device, dtype=input_ids.dtype),
             ),
             dim=-1,

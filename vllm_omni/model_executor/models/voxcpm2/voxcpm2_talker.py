@@ -36,8 +36,8 @@ from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+import vllm_omni.platforms as omni_platform
 from vllm_omni.model_executor.models.output_templates import OmniOutput
-from vllm_omni.platforms import current_omni_platform
 from vllm_omni.utils.speaker_cache import (
     get_speaker_cache,
     iter_custom_voice_profiles,
@@ -77,6 +77,7 @@ class _ForwardContextLike(Protocol):
 class VoxCPM2PreprocessInput(TypedDict, total=False):
     additional_information: dict[str, Any]
     request_id: str
+    _omni_seed: int | None
     text_token_ids: list[list[int]]
     reference_audio: object
     ref_audio: object
@@ -250,6 +251,10 @@ def _encode_raw_audio(
 @dataclasses.dataclass
 class _RequestState:
     request_id: str
+    # Per-request CFM noise generator, seeded once from the request's seed at
+    # first prefill chunk (runner passes it as ``_omni_seed``). None means the
+    # request carried no seed and draws noise from the global RNG stream.
+    cfm_generator: torch.Generator | None = None
     curr_embed_for_next: torch.Tensor | None = None
     prev_feat_embed: torch.Tensor | None = None
     curr_prefix_feat_cond: torch.Tensor | None = None
@@ -372,7 +377,7 @@ class _PerfTimer:
         self._enabled = enabled
         self._device_module = None
         if enabled:
-            device_module = torch.get_device_module(current_omni_platform.get_torch_device())
+            device_module = torch.get_device_module(omni_platform.current_omni_platform.get_torch_device())
             if not hasattr(device_module, "Event"):
                 logger.warning_once(
                     "VoxCPM2 profiler disabled: the current device does not provide accelerator timing events"
@@ -899,7 +904,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         # the checkpoint download/read cost at construction time; DummyModelLoader
         # will then randomize the just-loaded _tts params — this is intended.
         model_path = vllm_config.model_config.model
-        self._device = current_omni_platform.get_torch_device()
+        self._device = omni_platform.current_omni_platform.get_torch_device()
         VoxCPM = import_voxcpm2_core()
         native = VoxCPM.from_pretrained(model_path, load_denoiser=False, optimize=False)
         self._tts: nn.Module = native.tts_model.to(self._device)
@@ -917,15 +922,15 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         self._tts.residual_lm = None
         torch.accelerator.empty_cache()
 
-        self._inference_timesteps = 10
-        self._cfg_value = 2.0
+        self._inference_timesteps = self._runtime_config.inference_timesteps
+        self._cfg_value = self._runtime_config.cfg_value
         self._cfg_cutoff_ratio = self._runtime_config.cfg_cutoff_ratio
         # Number of trailing latent frames to keep as VAE receptive-field context
         # for sliding-window streaming decode. 12 matches the nanovllm reference
         # implementation and covers the longest VAE decoder receptive field.
         self._n_decode_pad_frames = 12
-        use_cuda_graph = current_omni_platform.is_cuda()
-        self._enable_torch_compile = current_omni_platform.supports_torch_inductor()
+        use_cuda_graph = omni_platform.current_omni_platform.is_cuda()
+        self._enable_torch_compile = omni_platform.current_omni_platform.supports_torch_inductor()
         self._compile_vae = self._enable_torch_compile
         self._max_decode_steps = 2000
         self._max_batch_size = getattr(vllm_config.scheduler_config, "max_num_seqs", 4)
@@ -1574,7 +1579,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         return sr_cond
 
     def _run_vae_decode(self, feat: torch.Tensor) -> torch.Tensor:
-        if feat.device.type != current_omni_platform.device_type:
+        if feat.device.type != omni_platform.current_omni_platform.device_type:
             return self.tts.audio_vae.decode(feat)
 
         sr_cond = self._get_vae_decode_sr_cond(feat.device)
@@ -1706,8 +1711,8 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         with _NvtxRange("voxcpm2.cfm.graph_copy_cond"):
             graph.cond.copy_(cond)
         with _NvtxRange("voxcpm2.cfm.graph_noise"):
-            if self._deterministic_cfm_noise:
-                self._fill_deterministic_cfm_noise(state, graph.noise)
+            if self._has_deterministic_cfm_noise(state):
+                self._fill_deterministic_cfm_noise_for_state(state, graph.noise)
             else:
                 graph.noise.normal_()
         with _NvtxRange("voxcpm2.cfm.graph_replay"):
@@ -1928,6 +1933,11 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
                 g.prefix_feat_cond[last : last + 1].expand(graph_size - num_reqs, -1, -1)
             )
         g.cfm_noise.normal_()
+        # Seeded rows overwrite their slice from their own generator, so the
+        # noise a seeded request sees does not depend on batch composition.
+        for i, state in enumerate(states[:num_reqs]):
+            if state.cfm_generator is not None:
+                g.cfm_noise[i : i + 1].normal_(generator=state.cfm_generator)
         self._perf.stop("unified.copy_inputs")
 
         self._perf.start("unified.replay")
@@ -2345,7 +2355,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
     def _run_cfm(self, dit_h: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         with _NvtxRange("voxcpm2.cfm"):
             if self._cfm_buffers is not None:
-                if self._enable_cfm_cuda_graph and dit_h.device.type == current_omni_platform.device_type:
+                if self._enable_cfm_cuda_graph and dit_h.device.type == omni_platform.current_omni_platform.device_type:
                     return self._run_cfm_cuda_graph(dit_h, cond).transpose(1, 2)
                 return _optimized_solve_euler(
                     self.tts.feat_decoder,
@@ -2369,15 +2379,15 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
     def _run_cfm_for_state(self, state: _RequestState, dit_h: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         with _NvtxRange("voxcpm2.cfm"):
             if self._cfm_buffers is not None:
-                if self._enable_cfm_cuda_graph and dit_h.device.type == current_omni_platform.device_type:
-                    if self._deterministic_cfm_noise and not self._enable_cfm_prealloc_output:
+                if self._enable_cfm_cuda_graph and dit_h.device.type == omni_platform.current_omni_platform.device_type:
+                    if self._has_deterministic_cfm_noise(state) and not self._enable_cfm_prealloc_output:
                         graph = self._get_cfm_cuda_graph(dit_h, cond)
                         with _NvtxRange("voxcpm2.cfm.graph_copy_mu"):
                             graph.mu.copy_(dit_h)
                         with _NvtxRange("voxcpm2.cfm.graph_copy_cond"):
                             graph.cond.copy_(cond)
                         with _NvtxRange("voxcpm2.cfm.graph_noise"):
-                            self._fill_deterministic_cfm_noise(state, graph.noise)
+                            self._fill_deterministic_cfm_noise_for_state(state, graph.noise)
                         with _NvtxRange("voxcpm2.cfm.graph_replay"):
                             graph.graph.replay()
                         with _NvtxRange("voxcpm2.cfm.graph_output_clone"):
@@ -2385,9 +2395,9 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
                     if not self._enable_cfm_prealloc_output:
                         return self._run_cfm_cuda_graph(dit_h, cond).transpose(1, 2)
                     return self._run_cfm_cuda_graph_to_state_buffer(state, dit_h, cond)
-                if self._deterministic_cfm_noise:
+                if self._has_deterministic_cfm_noise(state):
                     noise = self._cfm_buffers.noise[: dit_h.shape[0]]
-                    self._fill_deterministic_cfm_noise(state, noise)
+                    self._fill_deterministic_cfm_noise_for_state(state, noise)
                     return _optimized_solve_euler_with_noise(
                         self.tts.feat_decoder,
                         dit_h,
@@ -2418,6 +2428,23 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
                 n_timesteps=self._inference_timesteps,
                 cfg_value=self._cfg_value,
             ).transpose(1, 2)
+
+    def _has_deterministic_cfm_noise(self, state: _RequestState) -> bool:
+        """Whether this request's CFM noise is drawn deterministically."""
+        return state.cfm_generator is not None or self._deterministic_cfm_noise
+
+    def _fill_deterministic_cfm_noise_for_state(self, state: _RequestState, out: torch.Tensor) -> None:
+        """Deterministically fill ``out`` for a request with deterministic noise.
+
+        A request-level seed wins: the noise stream is a pure function of the
+        seed, so identical text + seed reproduces byte-identical audio
+        regardless of batch composition or request id. The replay-only
+        ``deterministic_cfm_noise`` hash applies otherwise.
+        """
+        if state.cfm_generator is not None:
+            out.normal_(generator=state.cfm_generator)
+        else:
+            self._fill_deterministic_cfm_noise(state, out)
 
     def _fill_deterministic_cfm_noise(self, state: _RequestState, out: torch.Tensor) -> None:
         """Fill CFM noise deterministically for benchmark replay only."""
@@ -2462,10 +2489,14 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
         batched_cond = torch.cat(conds, dim=0)
         b = batched_dit_h.shape[0]
 
-        if self._deterministic_cfm_noise and self._cfm_buffers is not None:
+        any_seeded = any(state.cfm_generator is not None for state, _, _ in batch)
+        if (self._deterministic_cfm_noise or any_seeded) and self._cfm_buffers is not None:
             noise = self._cfm_buffers.noise[:b]
             for i, (state, _, _) in enumerate(batch):
-                self._fill_deterministic_cfm_noise(state, noise[i : i + 1])
+                if self._has_deterministic_cfm_noise(state):
+                    self._fill_deterministic_cfm_noise_for_state(state, noise[i : i + 1])
+                else:
+                    noise[i : i + 1].normal_()
         else:
             noise = torch.randn(
                 b,
@@ -2602,10 +2633,14 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
             with _NvtxRange("voxcpm2.dit_proj"):
                 dit_h = dit_proj(lm_h, batch_out)
             cond = pfc.transpose(1, 2).contiguous()
-            if self._deterministic_cfm_noise and self._cfm_buffers is not None:
+            any_seeded = any(state.cfm_generator is not None for state in states)
+            if (self._deterministic_cfm_noise or any_seeded) and self._cfm_buffers is not None:
                 noise = self._cfm_buffers.noise[: dit_h.size(0)]
                 for i, state in enumerate(states):
-                    self._fill_deterministic_cfm_noise(state, noise[i : i + 1])
+                    if self._has_deterministic_cfm_noise(state):
+                        self._fill_deterministic_cfm_noise_for_state(state, noise[i : i + 1])
+                    else:
+                        noise[i : i + 1].normal_()
                 pred_feat = _optimized_solve_euler_with_noise(
                     self.tts.feat_decoder,
                     dit_h,
@@ -2680,7 +2715,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
 
     def _enqueue_delayed_audio_copy(self, state: _RequestState, audio: torch.Tensor) -> None:
         src = audio.detach().contiguous()
-        if src.device.type != current_omni_platform.device_type:
+        if src.device.type != omni_platform.current_omni_platform.device_type:
             state.pending_audio_copies.append(_PendingAudioCopy(host=src.cpu().contiguous()))
             return
 
@@ -2768,7 +2803,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
             if state.is_stopping or state.precomputed_is_stopping is not None:
                 continue
             stop_logits = state.precomputed_stop_logits
-            if stop_logits is None or stop_logits.device.type != current_omni_platform.device_type:
+            if stop_logits is None or stop_logits.device.type != omni_platform.current_omni_platform.device_type:
                 continue
             pending.append((state, stop_logits))
         if not pending:
@@ -3050,7 +3085,7 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
                     ready_req_ids = list(audio_by_req)
                     chunks = [audio_by_req[req_id].reshape(-1) for req_id in ready_req_ids]
                     if self._coalesce_audio_d2h and any(
-                        chunk.device.type == current_omni_platform.device_type for chunk in chunks
+                        chunk.device.type == omni_platform.current_omni_platform.device_type for chunk in chunks
                     ):
                         sizes = [int(chunk.numel()) for chunk in chunks]
                         merged = torch.cat(chunks, dim=0) if len(chunks) > 1 else chunks[0]
@@ -3061,7 +3096,8 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
                     mm["sr"] = [sr for _ in ready_req_ids]
                     mm["meta"] = {"req_id": ready_req_ids, "sparse_audio": ["1"]}
                 elif self._coalesce_audio_d2h and any(
-                    audio.device.type == current_omni_platform.device_type for audio in audio_by_req.values()
+                    audio.device.type == omni_platform.current_omni_platform.device_type
+                    for audio in audio_by_req.values()
                 ):
                     ready_req_ids = list(audio_by_req)
                     chunks = [audio_by_req[req_id].reshape(-1) for req_id in ready_req_ids]
@@ -3152,6 +3188,15 @@ class VoxCPM2TalkerForConditionalGeneration(nn.Module):
                 state.precomputed_stop_logits = None
                 state.precomputed_is_stopping = None
                 state.last_audio_patch_gpu = None
+                # SamplingParams.seed reaches vLLM's own sampler but never the
+                # CFM noise draws below, so a seeded request threads its seed
+                # into a dedicated generator here (same pattern as gepard).
+                state.cfm_noise_step = 0
+                state.cfm_generator = None
+                seed = info_dict.get("_omni_seed")
+                if seed is not None:
+                    state.cfm_generator = torch.Generator(device=self._device)
+                    state.cfm_generator.manual_seed(int(seed))
                 if not hasattr(state, "pending_audio_chunks_gpu"):
                     state.pending_audio_chunks_gpu = []
                 if not hasattr(state, "pending_audio_copies"):

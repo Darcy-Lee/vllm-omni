@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker import gpu_input_batch
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -103,6 +104,8 @@ def test_post_sample_talker_mtp_uses_current_sample_and_hidden() -> None:
     )
 
     assert received["req_ids"] == ["ready"]
+    assert isinstance(received["input_ids"], torch.Tensor)
+    assert isinstance(received["hidden_states"], torch.Tensor)
     assert received["input_ids"].tolist() == [101]
     assert received["hidden_states"].tolist() == [[1.0, 2.0]]
     assert received["req_infos"] == [{"duplex": {"data_plane": True}}]
@@ -139,6 +142,8 @@ def test_post_sample_talker_mtp_uses_gpu_token_with_async_scheduling() -> None:
     )
 
     assert received["req_ids"] == ["ready"]
+    assert isinstance(received["input_ids"], torch.Tensor)
+    assert isinstance(received["hidden_states"], torch.Tensor)
     assert received["input_ids"].tolist() == [101]
     assert received["hidden_states"].tolist() == [[1.0, 2.0]]
     assert received["req_infos"] == [{"duplex": {"data_plane": True}}]
@@ -214,6 +219,9 @@ def test_speech_extra_params_reach_model_sampler_as_sampling_metadata(monkeypatc
     )
 
     class Adapter:
+        def normalize(self, request):
+            return
+
         def validate(self, request):
             return None
 
@@ -272,7 +280,12 @@ def test_speech_extra_params_reach_model_sampler_as_sampling_metadata(monkeypatc
     )
     input_batch.sampling_metadata = input_batch._make_sampling_metadata()
 
-    received = []
+    received: list[SamplingMetadata] = []
+
+    def sample(logits: torch.Tensor, metadata: SamplingMetadata) -> str:
+        received.append(metadata)
+        return "model-sampler"
+
     runner = object.__new__(GPUARModelRunner)
     runner._omni_cache_policy = ModelCachePolicy(needs_full_hidden_states=True)
     runner._pooler_payload_include_hidden_flag = True
@@ -280,7 +293,7 @@ def test_speech_extra_params_reach_model_sampler_as_sampling_metadata(monkeypatc
     runner.model = SimpleNamespace(
         prefer_model_sampler=True,
         skips_model_sampler_output_token_history=True,
-        sample=lambda logits, metadata: received.append(metadata) or "model-sampler",
+        sample=sample,
     )
     runner.sampler = SimpleNamespace()
     logits = torch.zeros((1, 4))
@@ -504,7 +517,7 @@ def _make_async_output_runner(engine_output_type: str = "audio"):
     return runner
 
 
-def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monkeypatch):
+def test_build_omni_output_uses_snapshots_after_accumulation(monkeypatch):
     runner = _make_async_output_runner()
     events = []
 
@@ -519,10 +532,11 @@ def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monke
         "accumulate_full_payload_output",
         lambda self, rid, payload, request: events.append(f"accumulate:{rid}"),
     )
+    # The connector drain runs a TP collective and belongs to the caller's thread.
     monkeypatch.setattr(
         GPUARModelRunner,
         "get_omni_connector_output",
-        lambda self: events.append("connector") or "connector-output",
+        lambda self: pytest.fail("builder must not drain the connector"),
     )
 
     output = GPUARModelRunner._build_omni_model_runner_output_from_snapshot(
@@ -554,8 +568,7 @@ def test_build_omni_output_uses_snapshots_and_connector_after_accumulation(monke
     assert torch.equal(output.inter_stage_outputs[1]["hidden"], torch.tensor([[2.0], [3.0]]))
     assert output.multimodal_outputs is None
     assert output.kv_extracted_req_ids == ["r2"]
-    assert output.omni_connector_output == "connector-output"
-    assert events == ["accumulate:r1", "accumulate:r2", "connector"]
+    assert events == ["accumulate:r1", "accumulate:r2"]
 
 
 def test_build_omni_output_copies_hidden_for_partial_downstream_batch(monkeypatch):
@@ -1667,7 +1680,6 @@ class TestMergeModelKvTransferMetadata:
         # ...while the engine-shared originals are untouched.
         assert original["r1"]["custom_metadata"] is original_meta
         assert original_meta == {"a": 1}
-        assert "talker_codes" not in original["r1"]["custom_metadata"]
 
     def test_merge_without_model_meta_passes_entry_through(self):
         class _Model:
@@ -1710,7 +1722,7 @@ class TestDownstreamPayloadMemoization:
         return runner
 
     def test_missing_marker_defaults_true_without_memoizing(self):
-        stages = {"r1": None}
+        stages: dict[str, int | None] = {"r1": None}
         runner = self._runner(stages)
 
         assert runner._request_needs_downstream_stage_payload("r1") is True
@@ -1858,6 +1870,7 @@ class TestPreferModelSamplerNoneFallback:
             "minicpmo_4_5",
             "minimax_music3",
             "nemotron_voicechat",
+            "yue2",  # Always supplies SamplerOutput, including empty/prefill steps.
         }
         assert declarers == expected, (
             "The set of models declaring `prefer_model_sampler` changed:\n"
