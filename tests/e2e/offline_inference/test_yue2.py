@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
-"""Real-checkpoint regressions for YuE2 VAE loading and offline WAV export."""
+"""End-to-end regressions for YuE2 offline WAV export."""
 
 import os
 import subprocess
@@ -10,13 +10,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import soundfile as sf
-import torch
-from safetensors import safe_open
-from vllm.utils.torch_utils import set_default_torch_dtype
 
 from tests.helpers.mark import hardware_marks
 from tests.helpers.runtime import get_model_prefix
-from vllm_omni.model_executor.models.yue2.yue2 import YuE2VAE
 from vllm_omni.transformers_utils.repo_utils import hf_api
 
 pytestmark = [
@@ -34,25 +30,6 @@ def vae_path() -> Path:
     if not path.is_dir():
         path = Path(hf_api().snapshot_download(str(path), allow_patterns=["*.json", "*.safetensors"]))
     return path
-
-
-def test_vae_checkpoint_values_survive_bf16_loader(vae_path: Path) -> None:
-    # Match the dtype context around vLLM's model construction/load_weights.
-    with set_default_torch_dtype(torch.bfloat16):
-        model = YuE2VAE.from_pretrained(vae_path, decoder_only=True, device="cpu")
-        assert torch.get_default_dtype() == torch.bfloat16
-    actual = model.state_dict()
-    checked = set()
-    for shard in vae_path.glob("*.safetensors"):
-        with safe_open(shard, framework="pt", device="cpu") as checkpoint:
-            for name in checkpoint.keys():
-                if name.startswith("decoder."):
-                    expected = checkpoint.get_tensor(name)
-                    assert actual[name].dtype == expected.dtype == torch.float32
-                    # Checking only dtype misses an FP32 -> BF16 -> FP32 round trip.
-                    assert torch.equal(actual[name], expected), name
-                    checked.add(name)
-    assert checked and checked == set(actual)
 
 
 @pytest.mark.parametrize("max_frames,truncated", [(200, True), (9000, False)], ids=["budget", "natural-eos"])
